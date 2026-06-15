@@ -30,8 +30,6 @@ const candidateListSelect = {
   factoryId: true,
   broker: candidateListInclude.broker,
   factory: candidateListInclude.factory,
-  createdBy: { select: { id: true, name: true, email: true, role: true, teamCode: true } },
-  team: { select: { id: true, code: true, label: true, isActive: true } },
   gender: true,
   dateOfBirth: true,
   age: true,
