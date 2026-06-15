@@ -46,20 +46,22 @@ export class CompaniesService {
     const { page, pageSize, search } = parsePaginationParams(query);
     const where = this.buildWhere(type, search, brokerCompanyId);
     const lite = query.fields === 'lite' || (type === 'FACTORY' && !!brokerCompanyId);
-    const total = await this.prisma.company.count({ where });
-    const { page: safePage } = clampPage(page, total, pageSize);
-    const skip = (safePage - 1) * pageSize;
 
     if (lite) {
+      // Dropdown nhà máy chỉ cần danh sách (không dùng total, không phân trang) →
+      // bỏ query count để tiết kiệm 1 round-trip DB tuần tự (đáng kể khi DB ở khác vùng).
       const data = await this.prisma.company.findMany({
         where,
         orderBy: [{ type: 'asc' }, { name: 'asc' }],
-        skip,
         take: pageSize,
         select: companyLiteSelect,
       });
-      return { data, total, page: safePage, pageSize };
+      return { data, total: data.length, page: 1, pageSize };
     }
+
+    const total = await this.prisma.company.count({ where });
+    const { page: safePage } = clampPage(page, total, pageSize);
+    const skip = (safePage - 1) * pageSize;
 
     const [data, brokerCount, factoryCount, activeCount] = await Promise.all([
       this.prisma.company.findMany({
