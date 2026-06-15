@@ -19,6 +19,8 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   teamCode  String?
+  team      TeamCode? @relation("TeamCodeUsers", fields: [teamCode], references: [code], onDelete: SetNull, onUpdate: Cascade)
+  candidates Candidate[] @relation("CandidateCreator")
 }
 
 model CandidateCounter {
@@ -35,6 +37,8 @@ model TeamCode {
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  users     User[]   @relation("TeamCodeUsers")
+  candidates Candidate[] @relation("CandidateTeam")
 }
 
 model Company {
@@ -64,6 +68,9 @@ model Candidate {
   status             CandidateStatus      @default(COMPLETED)
   draftSessionId     String?
   createdByUserId    String?
+  createdBy          User?                @relation("CandidateCreator", fields: [createdByUserId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  teamCode           String?
+  team               TeamCode?            @relation("CandidateTeam", fields: [teamCode], references: [code], onDelete: SetNull, onUpdate: Cascade)
   lastSavedAt        DateTime?
   avatarUrl          String?
   chineseName        String?
@@ -130,6 +137,7 @@ model Candidate {
 
   @@index([status, draftSessionId])
   @@index([createdByUserId])
+  @@index([teamCode])
 }
 
 model CandidateFormSnapshot {

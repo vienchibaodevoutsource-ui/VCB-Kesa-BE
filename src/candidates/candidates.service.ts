@@ -6,7 +6,14 @@ import { clampPage } from '../common/utils/pagination';
 import { normalizeTeamCode, validateTeamCodeFormat } from '../common/utils/team-code';
 import { PrismaService } from '../prisma/prisma.service';
 
-const candidateInclude = { familyMembers: true, broker: true, factory: true, formSnapshot: true } as const;
+const candidateInclude = {
+  familyMembers: true,
+  broker: true,
+  factory: true,
+  createdBy: { select: { id: true, name: true, email: true, role: true, teamCode: true } },
+  team: { select: { id: true, code: true, label: true, isActive: true } },
+  formSnapshot: true,
+} as const;
 const candidateListInclude = {
   broker: { select: { id: true, name: true, chineseName: true, slug: true } },
   factory: { select: { id: true, name: true, chineseName: true, slug: true } },
@@ -15,6 +22,7 @@ const candidateListInclude = {
 const candidateListSelect = {
   id: true,
   candidateCode: true,
+  teamCode: true,
   vietnameseName: true,
   chineseName: true,
   company: true,
@@ -22,6 +30,8 @@ const candidateListSelect = {
   factoryId: true,
   broker: candidateListInclude.broker,
   factory: candidateListInclude.factory,
+  createdBy: { select: { id: true, name: true, email: true, role: true, teamCode: true } },
+  team: { select: { id: true, code: true, label: true, isActive: true } },
   gender: true,
   dateOfBirth: true,
   age: true,
@@ -102,6 +112,7 @@ export class CandidatesService {
     const factoryId = this.stringValue(data.factoryId);
     await this.validateBrokerFactory(brokerId, factoryId);
     await this.validateRequestedTeam(teamCode);
+    const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || null;
 
     const buildCreate = (candidateCode?: string) =>
       this.prisma.$transaction(async (tx) => {
@@ -110,6 +121,7 @@ export class CandidatesService {
             ...data,
             factoryId,
             candidateCode: candidateCode ?? this.stringValue(data.candidateCode) ?? null,
+            teamCode: resolvedTeamCode,
             status: 'COMPLETED',
             draftSessionId: null,
             lastSavedAt: new Date(),
@@ -123,14 +135,16 @@ export class CandidatesService {
       });
 
     if (!data.candidateCode) {
-      const teamForCode = (await this.resolveTeamForCode(teamCode, user)) || null;
-      if (teamForCode) return this.codes.withUniqueCandidateCode(teamForCode, buildCreate);
+      if (resolvedTeamCode) return this.codes.withUniqueCandidateCode(resolvedTeamCode, buildCreate);
     }
     return buildCreate();
   }
 
   async createDraft(body: Record<string, unknown>, user: AuthUser) {
     const formSnapshot = this.takeFormSnapshot(body);
+    const requestedTeam = typeof body.teamCode === 'string' ? body.teamCode : undefined;
+    await this.validateRequestedTeam(requestedTeam);
+    const resolvedTeamCode = (await this.resolveTeamForCode(requestedTeam, user)) || null;
     const draftSessionId = this.stringValue(body.draftSessionId);
     const brokerId = this.stringValue(body.brokerId);
     const factoryId = this.stringValue(body.factoryId);
@@ -148,13 +162,14 @@ export class CandidatesService {
           gender: this.stringValue(body.gender) || 'Nam',
           company: this.stringValue(body.company),
           candidateCode: null,
-          broker: { connect: { id: brokerId } },
-          factory: { connect: { id: factoryId } },
-        },
+          teamCode: resolvedTeamCode,
+          brokerId,
+          factoryId,
+        } as unknown as Prisma.CandidateCreateInput,
         include: candidateInclude,
       });
       await this.upsertFormSnapshot(tx, candidate.id, formSnapshot);
-      return this.withLegacyFormDataJson({ ...candidate, formSnapshot: formSnapshot ? this.snapshotRow(formSnapshot) : candidate.formSnapshot });
+      return this.withLegacyFormDataJson({ ...candidate, formSnapshot: formSnapshot ? this.snapshotRow(formSnapshot) : null });
     });
   }
 
@@ -174,9 +189,11 @@ export class CandidatesService {
     delete data.draftSessionId;
 
     let generatedCode: string | undefined;
+    await this.validateRequestedTeam(teamCode);
+    const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
+
     if (!existing.candidateCode && !data.candidateCode) {
-      const teamForCode = await this.resolveTeamForCode(teamCode, user);
-      if (teamForCode) generatedCode = await this.codes.generateCandidateCode(teamForCode);
+      if (resolvedTeamCode) generatedCode = await this.codes.generateCandidateCode(resolvedTeamCode);
     }
 
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
@@ -186,6 +203,7 @@ export class CandidatesService {
         data: {
           ...data,
           candidateCode: generatedCode ?? this.stringValue(data.candidateCode) ?? existing.candidateCode ?? null,
+          teamCode: resolvedTeamCode,
           status: 'DRAFT',
           draftSessionId,
           lastSavedAt: new Date(),
@@ -202,9 +220,11 @@ export class CandidatesService {
   async update(id: string, body: Record<string, unknown>) {
     const existing = await this.prisma.candidate.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Not found');
-    const { familyMembers, data } = this.cleanCandidatePayload(body);
+    const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
     const formSnapshot = this.takeFormSnapshot(data);
     delete data.draftSessionId;
+    await this.validateRequestedTeam(teamCode);
+    const resolvedTeamCode = teamCode ? normalizeTeamCode(teamCode) : existing.teamCode;
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
     return this.prisma.$transaction(async (tx) => {
       const candidate = await tx.candidate.update({
@@ -212,6 +232,7 @@ export class CandidatesService {
         data: {
           ...data,
           status: (data.status as CandidateStatus | undefined) ?? 'COMPLETED',
+          teamCode: resolvedTeamCode ?? null,
           lastSavedAt: new Date(),
           familyMembers: familyMembers?.length ? { create: familyMembers } : undefined,
         } as Prisma.CandidateUpdateInput,
@@ -238,6 +259,7 @@ export class CandidatesService {
       throw new BadRequestException('Vui long nhap ho ten ung vien');
     }
     await this.validateRequestedTeam(teamCode);
+    const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
 
     const buildUpdate = (candidateCode?: string) =>
@@ -247,6 +269,7 @@ export class CandidatesService {
           data: {
             ...data,
             candidateCode: candidateCode ?? this.stringValue(data.candidateCode) ?? existing.candidateCode ?? null,
+            teamCode: resolvedTeamCode,
             status: 'COMPLETED',
             draftSessionId: null,
             lastSavedAt: new Date(),
@@ -260,8 +283,7 @@ export class CandidatesService {
       });
 
     if (!existing.candidateCode && !data.candidateCode) {
-      const teamForCode = await this.resolveTeamForCode(teamCode, user);
-      if (teamForCode) return this.codes.withUniqueCandidateCode(teamForCode, buildUpdate);
+      if (resolvedTeamCode) return this.codes.withUniqueCandidateCode(resolvedTeamCode, buildUpdate);
     }
     return buildUpdate();
   }

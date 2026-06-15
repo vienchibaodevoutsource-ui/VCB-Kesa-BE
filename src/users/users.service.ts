@@ -77,7 +77,7 @@ export class UsersService {
       throw new ForbiddenException('Khong the thay doi quyen han cua tai khoan admin hoac chinh minh');
     }
 
-    const data: Prisma.UserUpdateInput = {};
+    const data: Prisma.UserUncheckedUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.email !== undefined) data.email = dto.email;
     if (dto.phone !== undefined) data.phone = dto.phone || null;
