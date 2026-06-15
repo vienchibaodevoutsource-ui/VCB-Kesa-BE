@@ -51,8 +51,19 @@ const candidateListSelect = {
 } as const;
 const DRAFT_PLACEHOLDER_NAME = '(Dang nhap)';
 
+export interface CandidateFilterOptions {
+  educations: string[];
+  brokers: { id: string; name: string; chineseName: string | null }[];
+}
+
+// filterOptions (học lực + môi giới) hầu như không đổi nhưng tốn 1 distinct quét cả bảng + 1 query brokers.
+// Cache trong bộ nhớ với TTL ngắn để các lần load danh sách kế tiếp không phải truy vấn lại.
+const FILTER_OPTIONS_TTL_MS = 60_000;
+
 @Injectable()
 export class CandidatesService {
+  private filterOptionsCache: { value: CandidateFilterOptions; expires: number } | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly codes: CandidateCodesService,
@@ -476,7 +487,12 @@ export class CandidatesService {
     return [{ createdAt: 'desc' }];
   }
 
-  private async getFilterOptions() {
+  private async getFilterOptions(): Promise<CandidateFilterOptions> {
+    const now = Date.now();
+    if (this.filterOptionsCache && this.filterOptionsCache.expires > now) {
+      return this.filterOptionsCache.value;
+    }
+
     const [educationRows, brokers] = await Promise.all([
       this.prisma.candidate.findMany({
         where: { education: { not: null } },
@@ -490,18 +506,33 @@ export class CandidatesService {
         orderBy: { name: 'asc' },
       }),
     ]);
-    return { educations: educationRows.map((r) => r.education).filter(Boolean), brokers };
+
+    const value: CandidateFilterOptions = {
+      educations: educationRows.map((r) => r.education).filter((v): v is string => Boolean(v)),
+      brokers,
+    };
+    this.filterOptionsCache = { value, expires: now + FILTER_OPTIONS_TTL_MS };
+    return value;
   }
 
   private async getStats() {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const [totalAll, maleCount, femaleCount, recentCount, filterOptions] = await Promise.all([
-      this.prisma.candidate.count(),
-      this.prisma.candidate.count({ where: { gender: 'Nam' } }),
-      this.prisma.candidate.count({ where: { gender: { in: ['Nữ', 'Nu'] } } }),
+    // Gộp totalAll + maleCount + femaleCount vào MỘT groupBy thay vì 3 count riêng → ít round-trip tới DB.
+    const [genderGroups, recentCount, filterOptions] = await Promise.all([
+      this.prisma.candidate.groupBy({ by: ['gender'], _count: { _all: true } }),
       this.prisma.candidate.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
       this.getFilterOptions(),
     ]);
+
+    let totalAll = 0;
+    let maleCount = 0;
+    let femaleCount = 0;
+    for (const group of genderGroups) {
+      const n = group._count._all;
+      totalAll += n;
+      if (group.gender === 'Nam') maleCount += n;
+      else if (group.gender === 'Nữ' || group.gender === 'Nu') femaleCount += n;
+    }
 
     return { totalAll, maleCount, femaleCount, recentCount, filterOptions };
   }
