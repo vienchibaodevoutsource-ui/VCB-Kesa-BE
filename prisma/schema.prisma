@@ -138,6 +138,8 @@ model Candidate {
   @@index([status, draftSessionId])
   @@index([createdByUserId])
   @@index([teamCode])
+  @@index([status, createdAt])
+  @@index([createdAt])
 }
 
 model CandidateFormSnapshot {
