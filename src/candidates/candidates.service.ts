@@ -4,6 +4,7 @@ import { CandidateCodesService } from '../candidate-codes/candidate-codes.servic
 import { AuthUser } from '../common/types';
 import { clampPage } from '../common/utils/pagination';
 import { normalizeTeamCode, validateTeamCodeFormat } from '../common/utils/team-code';
+import { FormsService } from '../forms/forms.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 const candidateInclude = {
@@ -65,6 +66,7 @@ export class CandidatesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly codes: CandidateCodesService,
+    private readonly forms: FormsService,
   ) {}
 
   async list(query: Record<string, unknown>) {
@@ -369,12 +371,11 @@ export class CandidatesService {
     if (!raw) return null;
 
     try {
-      const parsed = JSON.parse(raw) as Prisma.InputJsonValue;
-      const formType =
-        parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-          ? this.stringValue((parsed as Record<string, unknown>).formType) ?? this.stringValue((parsed as Record<string, unknown>).company)
-          : null;
-      return { raw, parsed, formType };
+      const parsed = JSON.parse(raw);
+      const normalized = this.forms.normalizeSnapshot(parsed, {
+        company: this.stringValue(data.company),
+      });
+      return { raw, parsed: normalized.data, formType: normalized.formType };
     } catch {
       throw new BadRequestException('formDataJson khong phai JSON hop le');
     }

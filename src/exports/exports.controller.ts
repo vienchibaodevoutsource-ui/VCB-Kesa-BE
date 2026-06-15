@@ -20,6 +20,18 @@ export class ExportsController {
       .send(buffer);
   }
 
+  @Post('candidate-docx')
+  async candidateDocx(@Body() body: Record<string, unknown>, @Res() response: Response) {
+    const { buffer, filename } = await this.exportsService.candidateDocx(body);
+    response
+      .status(200)
+      .set({
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+      })
+      .send(buffer);
+  }
+
   @Post('candidates-xlsx')
   async candidatesXlsx(@Body() body: Record<string, unknown>, @Res() response: Response) {
     const { buffer, filename } = await this.exportsService.candidatesXlsx(body);

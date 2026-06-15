@@ -28,6 +28,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { AuthUser } from '../common/types';
 import { UploadedFile as UploadedFileType } from '../common/types/uploaded-file';
 import { ExportsService } from '../exports/exports.service';
+import { FormsService } from '../forms/forms.service';
 import { RegistrationsService } from '../registrations/registrations.service';
 import { TeamCodesService } from '../team-codes/team-codes.service';
 import { UploadsService } from '../uploads/uploads.service';
@@ -45,6 +46,7 @@ export class CompatibilityController {
     private readonly ai: AiService,
     private readonly uploads: UploadsService,
     private readonly exportsService: ExportsService,
+    private readonly forms: FormsService,
     private readonly registrations: RegistrationsService,
   ) {}
 
@@ -249,6 +251,37 @@ export class CompatibilityController {
         'Content-Disposition': 'attachment',
       })
       .send(buffer);
+  }
+
+  @Post('export-candidate-docx')
+  @UseGuards(AuthGuard)
+  async exportCandidateDocx(@Body() body: Record<string, unknown>, @Res() response: Response) {
+    const { buffer, filename } = await this.exportsService.candidateDocx(body);
+    response
+      .status(200)
+      .set({
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+      })
+      .send(buffer);
+  }
+
+  @Get('forms')
+  @UseGuards(AuthGuard)
+  listForms() {
+    return this.forms.listSchemas();
+  }
+
+  @Get('forms/resolve')
+  @UseGuards(AuthGuard)
+  resolveForm(@Query() query: { brokerId?: string; factoryId?: string; brokerSlug?: string; factorySlug?: string; company?: string }) {
+    return this.forms.resolve(query);
+  }
+
+  @Get('forms/:formType/schema')
+  @UseGuards(AuthGuard)
+  formSchema(@Param('formType') formType: string) {
+    return this.forms.getSchema(formType);
   }
 
   @Post('export-candidates')
