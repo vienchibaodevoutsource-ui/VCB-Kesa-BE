@@ -1,0 +1,225 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  phone     String?
+  role      Role     @default(MEMBER)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  teamCode  String?
+}
+
+model CandidateCounter {
+  id        String   @id @default(uuid())
+  teamCode  String   @unique
+  count     Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+model TeamCode {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  label     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Company {
+  id              String      @id @default(uuid())
+  name            String
+  chineseName     String?
+  slug            String      @unique
+  type            CompanyType
+  formType        String      // BROKER: form template. FACTORY: kế thừa từ công ty môi giới liên kết
+  color           String?
+  isActive        Boolean     @default(true)
+  brokerCompanyId String?
+  brokerCompany   Company?    @relation("FactoryBroker", fields: [brokerCompanyId], references: [id])
+  factories       Company[]   @relation("FactoryBroker")
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  brokerCandidates  Candidate[] @relation("BrokerCompany")
+  factoryCandidates Candidate[] @relation("FactoryCompany")
+
+  @@index([brokerCompanyId, type])
+}
+
+model Candidate {
+  id                 String               @id @default(uuid())
+  candidateCode      String?
+  status             CandidateStatus      @default(COMPLETED)
+  draftSessionId     String?
+  createdByUserId    String?
+  lastSavedAt        DateTime?
+  avatarUrl          String?
+  chineseName        String?
+  vietnameseName     String
+  company            String?
+  brokerId           String?
+  factoryId          String?
+  broker             Company?             @relation("BrokerCompany", fields: [brokerId], references: [id])
+  factory            Company?             @relation("FactoryCompany", fields: [factoryId], references: [id])
+  gender             String
+  dateOfBirth        String?
+  age                Int?
+  height             Int?
+  weight             Int?
+  education          String?
+  maritalStatus      String?
+  passport           String?
+  criminalRecord     String?
+  healthCheck        String?
+  address            String?
+  religion           String?
+  visionLeft         String?
+  visionRight        String?
+  handedness         String?
+  smoking            String?
+  drinking           String?
+  colorBlindness     String?
+  tattoos            String?
+  languages          String[]
+  workExperience     String?
+  domesticExperience String?
+  overseasExperience String?
+  note               String?
+  cccd               String?
+  formDataJson       String?              // Toàn bộ dữ liệu form dạng JSON - dùng để restore khi chỉnh sửa
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  canStandLong       Boolean?             @default(true)
+  canWorkOvertime    Boolean?             @default(true)
+  canWorkRotation    Boolean?             @default(true)
+  glassesDegree      String?
+  hadSeriousIllness  Boolean?             @default(false)
+  hadSurgery         Boolean?             @default(false)
+  hasAstigmatism     Boolean?             @default(false)
+  hasScars           Boolean?             @default(false)
+  hasTattoo          Boolean?             @default(false)
+  healthIssueDesc    String?
+  illnessDescription String?
+  isColorBlind       Boolean?             @default(false)
+  isHealthy          Boolean?             @default(true)
+  limbImages         String[]
+  limbsIntact        Boolean?             @default(true)
+  maxLiftKg          Int?
+  needsGlasses       Boolean?             @default(false)
+  noPrefForDept      Boolean?             @default(true)
+  scarDescription    String?
+  scarImages         String[]
+  surgeryDescription String?
+  sweaty             Boolean?             @default(false)
+  tattooImages       String[]
+  familyMembers      FamilyMember[]
+  interviews         InterviewCandidate[]
+  formSnapshot       CandidateFormSnapshot?
+
+  @@index([status, draftSessionId])
+  @@index([createdByUserId])
+}
+
+model CandidateFormSnapshot {
+  id          String    @id @default(uuid())
+  candidateId String    @unique
+  formType    String?
+  data        Json
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([formType])
+}
+
+model FamilyMember {
+  id           String    @id @default(uuid())
+  candidateId  String
+  name         String?
+  relationship String
+  age          Int?
+  occupation   String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  candidate    Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+}
+
+model InterviewList {
+  id             String               @id @default(uuid())
+  title          String
+  taiwanCompany  String?
+  vietnamCompany String?
+  examDate       String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  candidates     InterviewCandidate[]
+}
+
+
+model InterviewCandidate {
+  id               String        @id @default(uuid())
+  interviewListId  String
+  candidateId      String
+  mathEnglishScore String?
+  beanPickingScore String?
+  preferenceOrder  String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  candidate        Candidate     @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  interviewList    InterviewList @relation(fields: [interviewListId], references: [id], onDelete: Cascade)
+
+  @@unique([interviewListId, candidateId])
+}
+
+model Registration {
+  id          String             @id @default(uuid())
+  status      RegistrationStatus @default(PENDING)
+  formType    String?
+  fullName    String
+  phone       String?
+  birthYear   String?
+  hometown    String?
+  gender      String?
+  height      String?
+  weight      String?
+  payloadJson String?
+  note        String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([status, createdAt])
+}
+
+enum Role {
+  MEMBER
+  ADMIN
+}
+
+enum CompanyType {
+  BROKER
+  FACTORY
+}
+
+enum CandidateStatus {
+  DRAFT
+  COMPLETED
+}
+
+enum RegistrationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
