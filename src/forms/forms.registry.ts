@@ -32,7 +32,15 @@ export const FACTORY_OWN_FORMS: Record<string, FormType> = {
 
 export const SELF_FORM_BROKERS = new Set<FormType>(['truong-thanh', 'thanh-dai']);
 
-const SHARED_REQUIRED = ['vietnameseName', 'gender'];
+const SHARED_REQUIRED = ['vietnameseName', 'gender', 'phone', 'dateOfBirth', 'cccd'];
+
+const SHARED_REQUIRED_FIELDS: FormSchemaField[] = [
+  { key: 'vietnameseName', label: 'Họ tên', required: true },
+  { key: 'gender', label: 'Giới tính', required: true },
+  { key: 'phone', label: 'Số điện thoại', required: true },
+  { key: 'dateOfBirth', label: 'Ngày sinh', required: true, type: 'date' },
+  { key: 'cccd', label: 'Căn cước công dân', required: true },
+];
 
 export const FORM_SCHEMAS: Record<FormType, FormSchema> = {
   standard: {
@@ -41,9 +49,7 @@ export const FORM_SCHEMAS: Record<FormType, FormSchema> = {
     templateBase: 'form_standard_template',
     requiredFields: SHARED_REQUIRED,
     fields: [
-      { key: 'vietnameseName', label: 'Họ tên', required: true },
-      { key: 'gender', label: 'Giới tính', required: true },
-      { key: 'dateOfBirth', label: 'Ngày sinh' },
+      ...SHARED_REQUIRED_FIELDS,
       { key: 'education', label: 'Học lực' },
       { key: 'domesticExperience', label: 'Kinh nghiệm trong nước' },
       { key: 'internationalExperience', label: 'Kinh nghiệm nước ngoài' },
@@ -55,8 +61,7 @@ export const FORM_SCHEMAS: Record<FormType, FormSchema> = {
     templateBase: 'form_truong_thanh_template',
     requiredFields: SHARED_REQUIRED,
     fields: [
-      { key: 'vietnameseName', label: 'Họ tên', required: true },
-      { key: 'gender', label: 'Giới tính', required: true },
+      ...SHARED_REQUIRED_FIELDS,
       { key: 'factoryName', label: 'Nhà máy' },
       { key: 'overallComment', label: 'Đánh giá' },
       { key: 'limbImages', label: 'Ảnh tứ chi', type: 'array' },
@@ -69,8 +74,7 @@ export const FORM_SCHEMAS: Record<FormType, FormSchema> = {
     templateBase: 'form_vinh_thang_template',
     requiredFields: SHARED_REQUIRED,
     fields: [
-      { key: 'vietnameseName', label: 'Họ tên', required: true },
-      { key: 'gender', label: 'Giới tính', required: true },
+      ...SHARED_REQUIRED_FIELDS,
       { key: 'mathScore', label: 'Điểm toán' },
       { key: 'beanCount', label: 'Gắp hạt đậu' },
       { key: 'lensCheck', label: 'Kiểm tra kính' },
@@ -83,8 +87,7 @@ export const FORM_SCHEMAS: Record<FormType, FormSchema> = {
     templateBase: 'form_thanh_dai_template',
     requiredFields: SHARED_REQUIRED,
     fields: [
-      { key: 'vietnameseName', label: 'Họ tên', required: true },
-      { key: 'gender', label: 'Giới tính', required: true },
+      ...SHARED_REQUIRED_FIELDS,
       { key: 'education', label: 'Học lực' },
     ],
   },
@@ -94,8 +97,7 @@ export const FORM_SCHEMAS: Record<FormType, FormSchema> = {
     templateBase: 'form_van_thong_template',
     requiredFields: SHARED_REQUIRED,
     fields: [
-      { key: 'vietnameseName', label: 'Họ tên', required: true },
-      { key: 'gender', label: 'Giới tính', required: true },
+      ...SHARED_REQUIRED_FIELDS,
       { key: 'photoUrl', label: 'Ảnh hồ sơ' },
     ],
   },
@@ -104,19 +106,13 @@ export const FORM_SCHEMAS: Record<FormType, FormSchema> = {
     label: 'Hoàn Vũ',
     templateBase: 'form_hoan_vu_template',
     requiredFields: SHARED_REQUIRED,
-    fields: [
-      { key: 'vietnameseName', label: 'Họ tên', required: true },
-      { key: 'gender', label: 'Giới tính', required: true },
-    ],
+    fields: [...SHARED_REQUIRED_FIELDS],
   },
   'ung-minh': {
     formType: 'ung-minh',
     label: 'Ứng Minh',
     templateBase: 'form_ung_minh_template',
     requiredFields: SHARED_REQUIRED,
-    fields: [
-      { key: 'vietnameseName', label: 'Họ tên', required: true },
-      { key: 'gender', label: 'Giới tính', required: true },
-    ],
+    fields: [...SHARED_REQUIRED_FIELDS],
   },
 };
