@@ -9,6 +9,7 @@ import PizZip from 'pizzip';
 import { FormsService } from '../forms/forms.service';
 import { FormType } from '../forms/forms.registry';
 import { PrismaService } from '../prisma/prisma.service';
+import { normalizeDocxFontSizesInZip } from './docx-font.util';
 
 const EDUCATION_ZH: Record<string, string> = {
   'Cấp 1': '小學',
@@ -309,6 +310,7 @@ export class ExportsService {
     }
     next = next.replace(/\{[^{}]+\}/g, '');
     zip.file('word/document.xml', next);
+    normalizeDocxFontSizesInZip(zip);
   }
 
   private snapshotObject(value: Prisma.JsonValue | string | null | undefined): Record<string, unknown> {
