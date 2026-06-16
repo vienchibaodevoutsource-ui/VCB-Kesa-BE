@@ -39,6 +39,7 @@ const candidateListSelect = {
   education: true,
   maritalStatus: true,
   address: true,
+  phone: true,
   createdAt: true,
   lastSavedAt: true,
   status: true,

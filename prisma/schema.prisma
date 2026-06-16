@@ -105,6 +105,8 @@ model Candidate {
   overseasExperience String?
   note               String?
   cccd               String?
+  phone              String?              // SĐT người lao động
+  relativePhone      String?              // SĐT người thân
   formDataJson       String?              // Toàn bộ dữ liệu form dạng JSON - dùng để restore khi chỉnh sửa
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
