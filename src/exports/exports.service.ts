@@ -10,6 +10,7 @@ import { FormsService } from '../forms/forms.service';
 import { FormType } from '../forms/forms.registry';
 import { PrismaService } from '../prisma/prisma.service';
 import { normalizeDocxFontSizesInZip } from './docx-font.util';
+import { embedPhotoIntoDocx } from './docx-image.util';
 
 const EDUCATION_ZH: Record<string, string> = {
   'Cấp 1': '小學',
@@ -83,30 +84,46 @@ export class ExportsService {
   }
 
   async candidateDocx(body: Record<string, unknown>) {
-    const candidateId = this.stringValue(body.candidateId);
-    if (!candidateId) throw new BadRequestException('Thieu candidateId');
-
-    const candidate = await this.prisma.candidate.findUnique({
-      where: { id: candidateId },
-      include: {
-        broker: true,
-        factory: true,
-        familyMembers: true,
-        formSnapshot: true,
-      },
-    });
-    if (!candidate) throw new NotFoundException('Khong tim thay ho so');
-
-    const snapshot = this.snapshotObject(candidate.formSnapshot?.data ?? candidate.formDataJson);
-    const explicitType = this.forms.normalizeFormType(body.formType) ?? this.forms.normalizeFormType(snapshot.formType);
-    const formType =
-      explicitType ??
-      this.forms.resolveFormType({
-        brokerSlug: candidate.broker?.slug,
-        factorySlug: candidate.factory?.slug,
-        company: candidate.company,
-      });
     const language = body.language === 'zh' ? 'zh' : 'vi';
+
+    // Hybrid: frontend gửi sẵn context ĐÃ ĐIỀN (đã dịch + checkbox ■/□ + câu phỏng vấn).
+    // Backend chỉ render context đó vào template (tái dùng logic đúng của frontend).
+    const providedContext =
+      body.context && typeof body.context === 'object' && !Array.isArray(body.context)
+        ? (body.context as Record<string, unknown>)
+        : null;
+
+    let formType: FormType;
+    let context: Record<string, unknown>;
+    let nameForFile: string;
+
+    if (providedContext) {
+      formType = this.forms.normalizeFormType(body.formType) ?? 'standard';
+      context = providedContext;
+      nameForFile =
+        this.stringValue(body.filename) ?? this.stringValue(providedContext.vietnameseName) ?? 'CV';
+    } else {
+      // Fallback (tương thích cũ): tự dựng context từ DB.
+      const candidateId = this.stringValue(body.candidateId);
+      if (!candidateId) throw new BadRequestException('Thieu candidateId');
+      const candidate = await this.prisma.candidate.findUnique({
+        where: { id: candidateId },
+        include: { broker: true, factory: true, familyMembers: true, formSnapshot: true },
+      });
+      if (!candidate) throw new NotFoundException('Khong tim thay ho so');
+      const snapshot = this.snapshotObject(candidate.formSnapshot?.data ?? candidate.formDataJson);
+      const explicitType = this.forms.normalizeFormType(body.formType) ?? this.forms.normalizeFormType(snapshot.formType);
+      formType =
+        explicitType ??
+        this.forms.resolveFormType({
+          brokerSlug: candidate.broker?.slug,
+          factorySlug: candidate.factory?.slug,
+          company: candidate.company,
+        });
+      context = this.buildDocxContext(candidate, snapshot, formType, language);
+      nameForFile = candidate.candidateCode || candidate.vietnameseName || candidate.id;
+    }
+
     const templatePath = this.resolveTemplatePath(formType, language);
     const zip = new PizZip(readFileSync(templatePath));
     const doc = new Docxtemplater(zip, {
@@ -115,17 +132,27 @@ export class ExportsService {
       nullGetter: () => '',
     });
 
-    doc.render(this.buildDocxContext(candidate, snapshot, formType, language));
+    doc.render(context);
     this.applyCommonDocxFixes(zip, formType);
+
+    // Nhúng ảnh hồ sơ nếu frontend gửi base64 + vị trí ô (vd Trường Thanh: bảng 0, ô r1c4).
+    const photo = this.stringValue(body.photo);
+    const cell = body.photoCell as { table?: number; row?: number; col?: number } | undefined;
+    if (photo && cell && typeof cell.table === 'number') {
+      try {
+        embedPhotoIntoDocx(zip, photo, { table: cell.table, row: cell.row ?? 0, col: cell.col ?? 0 });
+      } catch {
+        // Ảnh lỗi không được chặn cả file Word.
+      }
+    }
 
     const buffer = zip.generate({
       type: 'nodebuffer',
       compression: 'DEFLATE',
     }) as Buffer;
-    const code = candidate.candidateCode || candidate.vietnameseName || candidate.id;
     return {
       buffer,
-      filename: `${this.safeFilename(code)}-${formType}-${language}.docx`,
+      filename: `${this.safeFilename(nameForFile)}-${formType}-${language}.docx`,
     };
   }
 
