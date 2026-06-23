@@ -380,15 +380,17 @@ export class CandidatesService {
     delete data.formDataJson;
     if (!raw) return null;
 
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(raw);
-      const normalized = this.forms.normalizeSnapshot(parsed, {
-        company: this.stringValue(data.company),
-      });
-      return { raw, parsed: normalized.data, formType: normalized.formType };
+      parsed = JSON.parse(raw);
     } catch {
       throw new BadRequestException('formDataJson khong phai JSON hop le');
     }
+
+    const normalized = this.forms.normalizeSnapshot(parsed, {
+      company: this.stringValue(data.company),
+    });
+    return { raw, parsed: normalized.data, formType: normalized.formType };
   }
 
   private async upsertFormSnapshot(

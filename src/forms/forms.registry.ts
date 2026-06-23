@@ -32,14 +32,14 @@ export const FACTORY_OWN_FORMS: Record<string, FormType> = {
 
 export const SELF_FORM_BROKERS = new Set<FormType>(['truong-thanh', 'thanh-dai']);
 
-const SHARED_REQUIRED = ['vietnameseName', 'gender', 'phone', 'dateOfBirth', 'cccd'];
+const SHARED_REQUIRED = ['vietnameseName', 'gender', 'phone', 'dateOfBirth'];
 
 const SHARED_REQUIRED_FIELDS: FormSchemaField[] = [
   { key: 'vietnameseName', label: 'Họ tên', required: true },
   { key: 'gender', label: 'Giới tính', required: true },
   { key: 'phone', label: 'Số điện thoại', required: true },
   { key: 'dateOfBirth', label: 'Ngày sinh', required: true, type: 'date' },
-  { key: 'cccd', label: 'Căn cước công dân', required: true },
+  { key: 'cccd', label: 'Căn cước công dân', required: false },
 ];
 
 export const FORM_SCHEMAS: Record<FormType, FormSchema> = {
