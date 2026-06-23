@@ -31,6 +31,15 @@ export class HttpExceptionFilter implements ExceptionFilter {
       return;
     }
 
+    // body-parser ném PayloadTooLargeError khi body vượt limit → trả 413 rõ ràng thay vì 500 mơ hồ.
+    const err = exception as { type?: string; status?: number; statusCode?: number };
+    if (err?.type === 'entity.too.large' || err?.status === 413 || err?.statusCode === 413) {
+      response.status(HttpStatus.PAYLOAD_TOO_LARGE).json({
+        error: 'Hồ sơ hoặc ảnh quá lớn, vui lòng giảm dung lượng ảnh rồi thử lại.',
+      });
+      return;
+    }
+
     const message = exception instanceof Error ? exception.message : 'Internal server error';
     response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
       error: 'Internal server error',
