@@ -305,16 +305,25 @@ export class CandidatesService {
     return { success: true };
   }
 
-  async checkCccd(cccd?: string, excludeId?: string) {
-    const normalized = cccd?.trim();
-    if (!normalized || normalized.length < 9) return { duplicates: [] };
+  async checkCccd(cccd?: string, phone?: string, excludeId?: string) {
+    const normalizedCccd = cccd?.trim();
+    const normalizedPhone = phone?.trim();
+    const phoneDigits = normalizedPhone?.replace(/\D/g, '') ?? '';
+
+    const or: Prisma.CandidateWhereInput[] = [];
+    if (normalizedCccd && normalizedCccd.length >= 9) or.push({ cccd: normalizedCccd });
+    if (normalizedPhone && phoneDigits.length >= 9) or.push({ phone: normalizedPhone });
+    if (or.length === 0) return { duplicates: [] };
+
     const duplicates = await this.prisma.candidate.findMany({
-      where: { cccd: normalized, ...(excludeId ? { NOT: { id: excludeId } } : {}) },
+      where: { OR: or, ...(excludeId ? { NOT: { id: excludeId } } : {}) },
       select: {
         id: true,
         vietnameseName: true,
         candidateCode: true,
         dateOfBirth: true,
+        cccd: true,
+        phone: true,
         broker: { select: { name: true } },
         factory: { select: { name: true } },
         createdAt: true,

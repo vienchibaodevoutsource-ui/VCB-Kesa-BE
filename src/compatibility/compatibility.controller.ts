@@ -180,8 +180,12 @@ export class CompatibilityController {
 
   @Get('candidates/check-cccd')
   @UseGuards(AuthGuard)
-  checkCccd(@Query('cccd') cccd?: string, @Query('excludeId') excludeId?: string) {
-    return this.candidates.checkCccd(cccd, excludeId);
+  checkCccd(
+    @Query('cccd') cccd?: string,
+    @Query('phone') phone?: string,
+    @Query('excludeId') excludeId?: string,
+  ) {
+    return this.candidates.checkCccd(cccd, phone, excludeId);
   }
 
   @Get('candidates/:id')

@@ -18,8 +18,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
       const body = exception.getResponse();
       if (typeof body === 'object' && body !== null) {
         const payload = body as Record<string, unknown>;
+        // NestJS gắn lý do thật vào `message`, còn `error` chỉ là tên trạng thái ("Bad Request").
+        // Ưu tiên `message` để FE hiển thị đúng nguyên nhân thay vì câu generic.
+        const message = payload.message ?? payload.error ?? exception.message;
         response.status(status).json({
-          error: payload.error ?? payload.message ?? exception.message,
+          error: Array.isArray(message) ? message.join(', ') : message,
           details: payload.details,
         });
         return;
