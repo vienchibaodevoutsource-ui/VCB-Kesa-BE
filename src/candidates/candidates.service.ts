@@ -43,6 +43,8 @@ const candidateListSelect = {
   createdAt: true,
   lastSavedAt: true,
   status: true,
+  isVerified: true,
+  lineImageUrl: true,
   domesticExperience: true,
   overseasExperience: true,
   note: true,

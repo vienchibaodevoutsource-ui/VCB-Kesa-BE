@@ -73,6 +73,8 @@ model Candidate {
   team               TeamCode?            @relation("CandidateTeam", fields: [teamCode], references: [code], onDelete: SetNull, onUpdate: Cascade)
   lastSavedAt        DateTime?
   avatarUrl          String?
+  lineImageUrl       String?
+  isVerified         Boolean?             @default(false)
   chineseName        String?
   vietnameseName     String
   company            String?
