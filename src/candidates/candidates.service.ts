@@ -3,6 +3,7 @@ import { CandidateStatus, Prisma } from '@prisma/client';
 import { CandidateCodesService } from '../candidate-codes/candidate-codes.service';
 import { AuthUser } from '../common/types';
 import { clampPage } from '../common/utils/pagination';
+import { buildCandidateNameSearch, normalizeSearch } from '../common/utils/normalize';
 import { normalizeTeamCode, validateTeamCodeFormat } from '../common/utils/team-code';
 import { FormsService } from '../forms/forms.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -44,6 +45,9 @@ const candidateListSelect = {
   lastSavedAt: true,
   status: true,
   isVerified: true,
+  verifiedById: true,
+  verifiedByName: true,
+  verifiedAt: true,
   lineImageUrl: true,
   domesticExperience: true,
   overseasExperience: true,
@@ -134,6 +138,7 @@ export class CandidatesService {
           data: {
             ...data,
             factoryId,
+            nameSearch: this.computeNameSearch(data),
             candidateCode: candidateCode ?? this.stringValue(data.candidateCode) ?? null,
             teamCode: resolvedTeamCode,
             status: 'COMPLETED',
@@ -173,6 +178,7 @@ export class CandidatesService {
           createdByUserId: user.id,
           lastSavedAt: new Date(),
           vietnameseName: this.stringValue(body.vietnameseName) || DRAFT_PLACEHOLDER_NAME,
+          nameSearch: buildCandidateNameSearch([this.stringValue(body.vietnameseName), this.stringValue(body.chineseName)]) || null,
           gender: this.stringValue(body.gender) || 'Nam',
           company: this.stringValue(body.company),
           candidateCode: null,
@@ -217,6 +223,7 @@ export class CandidatesService {
         data: {
           ...data,
           candidateCode: generatedCode ?? this.stringValue(data.candidateCode) ?? existing.candidateCode ?? null,
+          nameSearch: this.computeNameSearch(data, existing.vietnameseName),
           teamCode: resolvedTeamCode,
           status: 'DRAFT',
           draftSessionId,
@@ -231,9 +238,10 @@ export class CandidatesService {
     });
   }
 
-  async update(id: string, body: Record<string, unknown>) {
+  async update(id: string, body: Record<string, unknown>, user: AuthUser) {
     const existing = await this.prisma.candidate.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Not found');
+    this.assertCanEdit(existing, user);
     const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
     const formSnapshot = this.takeFormSnapshot(data);
     delete data.draftSessionId;
@@ -246,6 +254,7 @@ export class CandidatesService {
         data: {
           ...data,
           status: (data.status as CandidateStatus | undefined) ?? 'COMPLETED',
+          nameSearch: this.computeNameSearch(data, existing.vietnameseName),
           teamCode: resolvedTeamCode ?? null,
           lastSavedAt: new Date(),
           familyMembers: familyMembers?.length ? { create: familyMembers } : undefined,
@@ -260,6 +269,7 @@ export class CandidatesService {
   async complete(id: string, body: Record<string, unknown>, user: AuthUser) {
     const existing = await this.prisma.candidate.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Not found');
+    this.assertCanEdit(existing, user);
     const draftSessionId = this.stringValue(body.draftSessionId);
     if (existing.status === 'DRAFT' && (!draftSessionId || existing.draftSessionId !== draftSessionId)) {
       throw new ForbiddenException('Khong co quyen hoan tat ho so draft nay');
@@ -283,6 +293,7 @@ export class CandidatesService {
           data: {
             ...data,
             candidateCode: candidateCode ?? this.stringValue(data.candidateCode) ?? existing.candidateCode ?? null,
+            nameSearch: this.computeNameSearch(data, existing.vietnameseName),
             teamCode: resolvedTeamCode,
             status: 'COMPLETED',
             draftSessionId: null,
@@ -305,6 +316,42 @@ export class CandidatesService {
   async remove(id: string) {
     await this.prisma.candidate.delete({ where: { id } });
     return { success: true };
+  }
+
+  // Kiểm duyệt / bỏ kiểm duyệt hồ sơ. Chỉ Admin hoặc tài khoản được cấp quyền (canModerate) mới được phép.
+  async setVerified(id: string, verified: boolean, user: AuthUser) {
+    const actor = await this.prisma.user.findUnique({
+      where: { id: user.id },
+      select: { role: true, canModerate: true, name: true },
+    });
+    const allowed = actor?.role === 'ADMIN' || actor?.canModerate === true;
+    if (!allowed) throw new ForbiddenException('Tai khoan khong co quyen kiem duyet');
+
+    const existing = await this.prisma.candidate.findUnique({ where: { id }, select: { id: true } });
+    if (!existing) throw new NotFoundException('Not found');
+
+    const candidate = await this.prisma.candidate.update({
+      where: { id },
+      data: verified
+        ? { isVerified: true, verifiedById: user.id, verifiedByName: actor?.name ?? user.name, verifiedAt: new Date() }
+        : { isVerified: false, verifiedById: null, verifiedByName: null, verifiedAt: null },
+      include: candidateInclude,
+    });
+    return this.withLegacyFormDataJson(candidate);
+  }
+
+  // Sau khi kiểm duyệt, hồ sơ bị khóa: chỉ Admin hoặc chính người đã kiểm duyệt mới được sửa.
+  private assertCanEdit(existing: { isVerified: boolean | null; verifiedById: string | null }, user: AuthUser) {
+    if (!existing.isVerified) return;
+    if (user.role === 'ADMIN') return;
+    if (existing.verifiedById && existing.verifiedById === user.id) return;
+    throw new ForbiddenException('Ho so da kiem duyet - chi Admin hoac nguoi kiem duyet moi co the sua');
+  }
+
+  private computeNameSearch(data: Record<string, unknown>, fallbackName?: string | null) {
+    const vn = this.stringValue(data.vietnameseName) ?? (fallbackName ? fallbackName : null);
+    const cn = this.stringValue(data.chineseName);
+    return buildCandidateNameSearch([vn, cn]) || null;
   }
 
   async checkCccd(cccd?: string, phone?: string, excludeId?: string) {
@@ -365,7 +412,21 @@ export class CandidatesService {
   }
 
   private cleanCandidatePayload(body: Record<string, unknown>) {
-    const { familyMembers, skills: _skills, interviewResult: _interviewResult, teamCode, complete: _complete, isDraft: _isDraft, ...data } = body;
+    const {
+      familyMembers,
+      skills: _skills,
+      interviewResult: _interviewResult,
+      teamCode,
+      complete: _complete,
+      isDraft: _isDraft,
+      // Cờ kiểm duyệt chỉ được đổi qua endpoint verify, không nhận từ payload thường.
+      isVerified: _isVerified,
+      verifiedById: _verifiedById,
+      verifiedByName: _verifiedByName,
+      verifiedAt: _verifiedAt,
+      nameSearch: _nameSearch,
+      ...data
+    } = body;
     return {
       familyMembers: Array.isArray(familyMembers) ? (familyMembers as Prisma.FamilyMemberCreateWithoutCandidateInput[]) : [],
       teamCode: typeof teamCode === 'string' ? teamCode : undefined,
@@ -469,15 +530,18 @@ export class CandidatesService {
     if (query.status === 'DRAFT' || query.status === 'COMPLETED') and.push({ status: query.status });
     if (query.draftSessionId) and.push({ draftSessionId: String(query.draftSessionId) });
     if (search) {
+      const normalized = normalizeSearch(search);
       and.push({
         OR: [
-          { vietnameseName: { contains: search, mode: 'insensitive' } },
-          { chineseName: { contains: search, mode: 'insensitive' } },
-          { candidateCode: { contains: search, mode: 'insensitive' } },
-          { address: { contains: search, mode: 'insensitive' } },
-          { company: { contains: search, mode: 'insensitive' } },
-          { broker: { name: { contains: search, mode: 'insensitive' } } },
-          { factory: { name: { contains: search, mode: 'insensitive' } } },
+          // Tìm theo tên không dấu / không phân biệt hoa-thường qua cột nameSearch đã chuẩn hóa.
+          ...(normalized ? [{ nameSearch: { contains: normalized } }] : []),
+          { vietnameseName: { contains: search, mode: 'insensitive' as const } },
+          { chineseName: { contains: search, mode: 'insensitive' as const } },
+          { candidateCode: { contains: search, mode: 'insensitive' as const } },
+          { address: { contains: search, mode: 'insensitive' as const } },
+          { company: { contains: search, mode: 'insensitive' as const } },
+          { broker: { name: { contains: search, mode: 'insensitive' as const } } },
+          { factory: { name: { contains: search, mode: 'insensitive' as const } } },
         ],
       });
     }

@@ -21,6 +21,10 @@ export class CreateUserDto {
   role?: Role;
 
   @IsOptional()
+  @IsBoolean()
+  canModerate?: boolean;
+
+  @IsOptional()
   @IsString()
   teamCode?: string;
 }
@@ -49,6 +53,10 @@ export class UpdateUserDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  canModerate?: boolean;
 
   @IsOptional()
   @IsString()

@@ -44,8 +44,13 @@ export class CandidatesController {
   }
 
   @Put(':id')
-  async update(@Param('id') id: string, @Body() body: Record<string, unknown>) {
-    return { data: await this.candidates.update(id, body) };
+  async update(@Param('id') id: string, @Body() body: Record<string, unknown>, @CurrentUser() user: AuthUser) {
+    return { data: await this.candidates.update(id, body, user) };
+  }
+
+  @Patch(':id/verify')
+  async verify(@Param('id') id: string, @Body() body: { verified?: boolean }, @CurrentUser() user: AuthUser) {
+    return { data: await this.candidates.setVerified(id, body?.verified !== false, user) };
   }
 
   @Post(':id/complete')

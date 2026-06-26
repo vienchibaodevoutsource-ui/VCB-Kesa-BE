@@ -202,14 +202,20 @@ export class CompatibilityController {
 
   @Put('candidates/:id')
   @UseGuards(AuthGuard)
-  updateCandidate(@Param('id') id: string, @Body() body: Record<string, unknown>) {
-    return this.candidates.update(id, body);
+  updateCandidate(@Param('id') id: string, @Body() body: Record<string, unknown>, @CurrentUser() user: AuthUser) {
+    return this.candidates.update(id, body, user);
   }
 
   @Post('candidates/:id/complete')
   @UseGuards(AuthGuard)
   completeCandidate(@Param('id') id: string, @Body() body: Record<string, unknown>, @CurrentUser() user: AuthUser) {
     return this.candidates.complete(id, body, user);
+  }
+
+  @Patch('candidates/:id/verify')
+  @UseGuards(AuthGuard)
+  verifyCandidate(@Param('id') id: string, @Body() body: { verified?: boolean }, @CurrentUser() user: AuthUser) {
+    return this.candidates.setVerified(id, body?.verified !== false, user);
   }
 
   @Delete('candidates/:id')

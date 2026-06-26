@@ -14,6 +14,7 @@ const userSelect = {
   phone: true,
   role: true,
   isActive: true,
+  canModerate: true,
   createdAt: true,
   teamCode: true,
 } as const;
@@ -65,6 +66,7 @@ export class UsersService {
         password: await bcrypt.hash(dto.password, 10),
         phone: dto.phone || null,
         role: dto.role || 'MEMBER',
+        canModerate: dto.canModerate ?? false,
         teamCode,
       },
       select: userSelect,
@@ -83,6 +85,7 @@ export class UsersService {
     if (dto.phone !== undefined) data.phone = dto.phone || null;
     if (dto.role !== undefined) data.role = dto.role;
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
+    if (dto.canModerate !== undefined) data.canModerate = dto.canModerate;
     if (dto.teamCode !== undefined) data.teamCode = await this.validateTeamCode(dto.teamCode);
     if (dto.password) data.password = await bcrypt.hash(dto.password, 10);
 

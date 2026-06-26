@@ -28,6 +28,7 @@ export class AuthService {
         isActive: true,
         password: true,
         teamCode: true,
+        canModerate: true,
       },
     });
 
@@ -44,6 +45,7 @@ export class AuthService {
       email: user.email,
       role: user.role,
       teamCode: user.teamCode,
+      canModerate: user.canModerate,
     });
 
     return { user: safeUser, token };
@@ -80,6 +82,7 @@ export class AuthService {
         role: true,
         isActive: true,
         teamCode: true,
+        canModerate: true,
         createdAt: true,
       },
     });

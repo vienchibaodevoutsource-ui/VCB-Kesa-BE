@@ -6,4 +6,5 @@ export interface AuthUser {
   email: string;
   role: Role;
   teamCode?: string | null;
+  canModerate?: boolean;
 }

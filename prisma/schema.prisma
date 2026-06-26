@@ -16,6 +16,7 @@ model User {
   phone     String?
   role      Role     @default(MEMBER)
   isActive  Boolean  @default(true)
+  canModerate Boolean @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   teamCode  String?
@@ -75,6 +76,10 @@ model Candidate {
   avatarUrl          String?
   lineImageUrl       String?
   isVerified         Boolean?             @default(false)
+  verifiedById       String?
+  verifiedByName     String?
+  verifiedAt         DateTime?
+  nameSearch         String?
   chineseName        String?
   vietnameseName     String
   company            String?
@@ -144,6 +149,7 @@ model Candidate {
   @@index([teamCode])
   @@index([status, createdAt])
   @@index([createdAt])
+  @@index([nameSearch])
 }
 
 model CandidateFormSnapshot {
