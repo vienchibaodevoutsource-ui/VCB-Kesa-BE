@@ -131,6 +131,7 @@ export class CandidatesService {
     await this.validateBrokerFactory(brokerId, factoryId);
     await this.validateRequestedTeam(teamCode);
     const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || null;
+    if (!resolvedTeamCode) throw new BadRequestException('Vui long chon ma to ho so (Team Code)');
 
     const buildCreate = (candidateCode?: string) =>
       this.prisma.$transaction(async (tx) => {
@@ -284,6 +285,7 @@ export class CandidatesService {
     }
     await this.validateRequestedTeam(teamCode);
     const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
+    if (!resolvedTeamCode) throw new BadRequestException('Vui long chon ma to ho so (Team Code)');
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
 
     const buildUpdate = (candidateCode?: string) =>
