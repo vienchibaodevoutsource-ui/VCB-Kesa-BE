@@ -519,7 +519,7 @@ export class CandidatesService {
   }
 
   private isCandidateListRequest(query: Record<string, unknown>) {
-    return ['page', 'pageSize', 'search', 'gender', 'education', 'brokerId', 'factoryId', 'fromDate', 'toDate', 'sortBy', 'status', 'draftSessionId'].some(
+    return ['page', 'pageSize', 'search', 'gender', 'education', 'brokerId', 'factoryId', 'fromDate', 'toDate', 'sortBy', 'status', 'draftSessionId', 'isVerified'].some(
       (key) => query[key] !== undefined,
     );
   }
@@ -549,6 +549,8 @@ export class CandidatesService {
     if (query.education) and.push({ education: String(query.education) });
     if (query.brokerId) and.push({ brokerId: String(query.brokerId) });
     if (query.factoryId) and.push({ factoryId: String(query.factoryId) });
+    if (query.isVerified === 'true') and.push({ isVerified: true });
+    else if (query.isVerified === 'false') and.push({ OR: [{ isVerified: false }, { isVerified: null }] });
     if (query.fromDate || query.toDate) {
       const createdAt: Prisma.DateTimeFilter = {};
       if (query.fromDate) createdAt.gte = new Date(String(query.fromDate));
