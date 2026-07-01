@@ -57,6 +57,11 @@ const candidateListSelect = {
 } as const;
 const DRAFT_PLACEHOLDER_NAME = '(Dang nhap)';
 
+// Candidate writes embed base64 images (payload up to ~25MB), so the candidate
+// create/update + form-snapshot upsert can exceed Prisma's default 5s interactive
+// transaction limit. Give the write transaction more room to finish.
+const CANDIDATE_TX_OPTIONS = { maxWait: 15_000, timeout: 30_000 } as const;
+
 export interface CandidateFilterOptions {
   educations: string[];
   brokers: { id: string; name: string; chineseName: string | null }[];
@@ -75,6 +80,11 @@ export class CandidatesService {
     private readonly codes: CandidateCodesService,
     private readonly forms: FormsService,
   ) {}
+
+  // Wrap candidate write transactions with an extended timeout (see CANDIDATE_TX_OPTIONS).
+  private candidateTx<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    return this.prisma.$transaction(fn, CANDIDATE_TX_OPTIONS);
+  }
 
   async list(query: Record<string, unknown>) {
     if (query.statsOnly === '1') {
@@ -134,7 +144,7 @@ export class CandidatesService {
     if (!resolvedTeamCode) throw new BadRequestException('Vui long chon ma to ho so (Team Code)');
 
     const buildCreate = (candidateCode?: string) =>
-      this.prisma.$transaction(async (tx) => {
+      this.candidateTx(async (tx) => {
         const candidate = await tx.candidate.create({
           data: {
             ...data,
@@ -171,7 +181,7 @@ export class CandidatesService {
     if (!draftSessionId) throw new BadRequestException('Thieu draftSessionId');
     if (!brokerId || !factoryId) throw new BadRequestException('Thieu brokerId hoac factoryId');
     await this.validateBrokerFactory(brokerId, factoryId, true);
-    return this.prisma.$transaction(async (tx) => {
+    return this.candidateTx(async (tx) => {
       const candidate = await tx.candidate.create({
         data: {
           status: 'DRAFT',
@@ -218,7 +228,7 @@ export class CandidatesService {
     }
 
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
-    return this.prisma.$transaction(async (tx) => {
+    return this.candidateTx(async (tx) => {
       const candidate = await tx.candidate.update({
         where: { id },
         data: {
@@ -249,7 +259,7 @@ export class CandidatesService {
     await this.validateRequestedTeam(teamCode);
     const resolvedTeamCode = teamCode ? normalizeTeamCode(teamCode) : existing.teamCode;
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
-    return this.prisma.$transaction(async (tx) => {
+    return this.candidateTx(async (tx) => {
       const candidate = await tx.candidate.update({
         where: { id },
         data: {
@@ -289,7 +299,7 @@ export class CandidatesService {
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
 
     const buildUpdate = (candidateCode?: string) =>
-      this.prisma.$transaction(async (tx) => {
+      this.candidateTx(async (tx) => {
         const candidate = await tx.candidate.update({
           where: { id },
           data: {

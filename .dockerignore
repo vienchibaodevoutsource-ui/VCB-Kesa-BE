@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.local
+.git
+coverage
+*.tsbuildinfo
+Dockerfile
+.dockerignore
+README.md
