@@ -1,0 +1,76 @@
+name: Backup DB + Storage to Google Drive
+
+on:
+  schedule:
+    # 19:00 UTC = 02:00 sáng giờ VN (UTC+7), chạy hằng ngày
+    - cron: '0 19 * * *'
+  workflow_dispatch: # cho phép bấm chạy tay từ tab Actions
+
+# Không cần quyền ghi vào repo — job chỉ đọc DB/Storage và đẩy lên Google Drive
+permissions:
+  contents: read
+
+env:
+  # --- Non-secret: cấu hình Supabase Storage (S3-compatible) ---
+  SB_BUCKET: imageKesa
+  SB_ENDPOINT: https://wjydrqpcyssqffvxewvw.storage.supabase.co/storage/v1/s3
+  SB_REGION: ap-southeast-2
+  # Số ngày giữ bản dump DB trên Drive; cũ hơn sẽ bị xoá
+  RETENTION_DAYS: 30
+
+  # --- rclone remote "gdrive" (Google Drive, OAuth token của bạn) ---
+  RCLONE_CONFIG_GDRIVE_TYPE: drive
+  RCLONE_CONFIG_GDRIVE_SCOPE: drive
+  RCLONE_CONFIG_GDRIVE_CLIENT_ID: ${{ secrets.RCLONE_GDRIVE_CLIENT_ID }}
+  RCLONE_CONFIG_GDRIVE_CLIENT_SECRET: ${{ secrets.RCLONE_GDRIVE_CLIENT_SECRET }}
+  RCLONE_CONFIG_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
+  RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+
+  # --- rclone remote "sb" (Supabase Storage qua S3) ---
+  RCLONE_CONFIG_SB_TYPE: s3
+  RCLONE_CONFIG_SB_PROVIDER: Other
+  RCLONE_CONFIG_SB_ACCESS_KEY_ID: ${{ secrets.SB_S3_ACCESS_KEY_ID }}
+  RCLONE_CONFIG_SB_SECRET_ACCESS_KEY: ${{ secrets.SB_S3_SECRET_ACCESS_KEY }}
+  RCLONE_CONFIG_SB_ENDPOINT: https://wjydrqpcyssqffvxewvw.storage.supabase.co/storage/v1/s3
+  RCLONE_CONFIG_SB_REGION: ap-southeast-2
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rclone
+        run: |
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Dump database
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y%m%d-%H%M%S)
+          FILE="db-${STAMP}.sql.gz"
+          echo "Dumping database -> ${FILE}"
+          # pg_dump chạy trong container postgres:17 để khớp version, không cần cài client trên runner
+          docker run --rm -i postgres:17-alpine \
+            pg_dump --no-owner --no-privileges "${BACKUP_DATABASE_URL}" \
+            | gzip -9 > "${FILE}"
+          ls -lh "${FILE}"
+          echo "DUMP_FILE=${FILE}" >> "$GITHUB_ENV"
+
+      - name: Upload DB dump to Google Drive
+        run: |
+          set -euo pipefail
+          rclone copyto "${DUMP_FILE}" "gdrive:db/${DUMP_FILE}" --drive-chunk-size 32M -v
+
+      - name: Mirror Storage bucket to Google Drive
+        run: |
+          set -euo pipefail
+          # sync = giữ thư mục storage/ trên Drive khớp với bucket (thêm file mới, cập nhật file đổi)
+          rclone sync "sb:${SB_BUCKET}" "gdrive:storage" --fast-list --drive-chunk-size 32M -v
+
+      - name: Prune old DB dumps
+        run: |
+          set -euo pipefail
+          # Xoá các bản dump DB cũ hơn RETENTION_DAYS ngày (ảnh trong storage/ giữ nguyên vì là mirror)
+          rclone delete "gdrive:db" --min-age "${RETENTION_DAYS}d" --include "db-*.sql.gz" -v || true
