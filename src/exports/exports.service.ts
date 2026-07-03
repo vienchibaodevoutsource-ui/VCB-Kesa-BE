@@ -192,8 +192,7 @@ export class ExportsService {
       { header: '學歷\nHọc lực', key: 'edu', width: 10 },
       { header: '婚姻狀況\nHôn nhân', key: 'marital', width: 12 },
       { header: '應聘公司\nCông ty', key: 'company', width: 12 },
-      { header: '在地工作經驗\nKinh nghiệm VN', key: 'vnExp', width: 36 },
-      { header: '在臺工作經驗\nKinh nghiệm ĐL', key: 'twExp', width: 36 },
+      { header: '工作經驗\nKinh nghiệm làm việc', key: 'exp', width: 48 },
       { header: '備註\nGhi chú', key: 'note', width: 32 },
       { header: '建檔日期\nNgày lưu', key: 'saved', width: 18 },
       { header: '數學\nĐiểm toán', key: 'mathScore', width: 12 },
@@ -214,18 +213,20 @@ export class ExportsService {
         stt: index + 1,
         code: candidate.candidateCode || '',
         zhName: candidate.chineseName || snapshot.chineseName || '',
-        vnName: candidate.vietnameseName || snapshot.vietnameseName || '',
+        vnName: this.asciiUpper(candidate.vietnameseName || snapshot.vietnameseName || ''),
         phone: candidate.phone || snapshot.phone || '',
         gender: GENDER_ZH[candidate.gender] || candidate.gender || '',
-        dob: candidate.dateOfBirth || snapshot.dateOfBirth || '',
+        dob: this.formatDobYmd(candidate.dateOfBirth || snapshot.dateOfBirth || ''),
         age: candidate.age ?? snapshot.age ?? '',
         height: candidate.height ?? snapshot.height ?? '',
         weight: candidate.weight ?? snapshot.weight ?? '',
         edu: EDUCATION_ZH[candidate.education || ''] || candidate.education || '',
         marital: MARITAL_ZH[candidate.maritalStatus || ''] || candidate.maritalStatus || '',
         company: this.companyLabel(candidate.company, candidate.broker?.slug, candidate.factory?.slug),
-        vnExp: candidate.domesticExperience || snapshot.domesticExperience || '',
-        twExp: candidate.overseasExperience || snapshot.internationalExperience || snapshot.overseasExperience || '',
+        exp: this.mergeExperience(
+          candidate.domesticExperience || snapshot.domesticExperience || '',
+          candidate.overseasExperience || snapshot.internationalExperience || snapshot.overseasExperience || '',
+        ),
         note: candidate.note || snapshot.note || snapshot.overallComment || '',
         saved: this.formatDateTime(candidate.createdAt),
         mathScore: this.firstText(snapshot.mathScore, snapshot.mathEnglishScore),
@@ -385,5 +386,36 @@ export class ExportsService {
     const date = value instanceof Date ? value : new Date(value);
     if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleString('vi-VN', { hour12: false });
+  }
+
+  /** Tên tiếng Việt → Latin không dấu, IN HOA (vd "Trần Duy Tình" → "TRAN DUY TINH"). */
+  private asciiUpper(value: unknown): string {
+    const s = typeof value === 'string' ? value : value == null ? '' : String(value);
+    return s
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/đ/g, 'd')
+      .replace(/Đ/g, 'D')
+      .toUpperCase()
+      .trim();
+  }
+
+  /** Chuẩn hoá ngày sinh về dạng yyyy/mm/dd (nhận cả yyyy-mm-dd và dd/mm/yyyy). */
+  private formatDobYmd(value: unknown): string {
+    const s = (typeof value === 'string' ? value : value == null ? '' : String(value)).trim();
+    if (!s) return '';
+    let m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+    if (m) return `${m[1]}/${m[2].padStart(2, '0')}/${m[3].padStart(2, '0')}`;
+    m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+    if (m) return `${m[3]}/${m[2].padStart(2, '0')}/${m[1].padStart(2, '0')}`;
+    return s;
+  }
+
+  /** Gộp kinh nghiệm VN + Đài Loan thành một cột, mỗi phần một dòng. */
+  private mergeExperience(...values: unknown[]): string {
+    return values
+      .map((v) => (typeof v === 'string' ? v.trim() : v == null ? '' : String(v).trim()))
+      .filter(Boolean)
+      .join('\n');
   }
 }
