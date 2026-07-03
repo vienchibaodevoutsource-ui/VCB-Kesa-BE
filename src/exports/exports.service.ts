@@ -209,7 +209,7 @@ export class ExportsService {
 
     ordered.forEach((candidate, index) => {
       const snapshot = this.snapshotObject(candidate.formSnapshot?.data ?? candidate.formDataJson);
-      const row = ws.addRow({
+      const rowData = {
         stt: index + 1,
         code: candidate.candidateCode || '',
         zhName: candidate.chineseName || snapshot.chineseName || '',
@@ -233,8 +233,10 @@ export class ExportsService {
         beanCount: this.firstText(snapshot.beanCount, snapshot.beanPickingScore),
         lensCheck: this.firstText(snapshot.lensCheck, snapshot.glassesDegree),
         shiftChoice: this.shiftLabel(this.firstText(snapshot.shiftChoice, snapshot.shiftPreference)),
-      });
-      row.height = 22;
+      };
+      const row = ws.addRow(rowData);
+      // Chiều cao dòng theo nội dung để KHÔNG che khuất ô nhiều dòng (tên xuống dòng, cột kinh nghiệm).
+      row.height = this.estimateRowHeight(rowData, ws.columns);
       row.alignment = { vertical: 'middle', wrapText: true };
       if (index % 2 === 1) {
         row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F4FF' } };
@@ -409,6 +411,36 @@ export class ExportsService {
     m = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
     if (m) return `${m[3]}/${m[2].padStart(2, '0')}/${m[1].padStart(2, '0')}`;
     return s;
+  }
+
+  /**
+   * Ước lượng chiều cao dòng (point) theo nội dung để ô nhiều dòng không bị che khuất:
+   * đếm số dòng do xuống hàng thủ công (\n) + tự wrap theo bề rộng cột (ký tự CJK tính ~2 đơn vị).
+   */
+  private estimateRowHeight(
+    rowData: Record<string, unknown>,
+    columns: ReadonlyArray<{ key?: string; width?: number }>,
+  ): number {
+    const LINE_PT = 16;
+    const MIN_PT = 22;
+    const MAX_PT = 300;
+    let maxLines = 1;
+    for (const col of columns) {
+      if (!col.key) continue;
+      const width = typeof col.width === 'number' && col.width > 0 ? col.width : 10;
+      // Bề rộng hữu dụng ~80% (font tỉ lệ rộng hơn đơn vị cột) → ước lượng thận trọng, tránh cắt chữ.
+      const usable = Math.max(1, width * 0.8);
+      const value = rowData[col.key];
+      const text = value == null ? '' : String(value);
+      if (!text) continue;
+      const lines = text.split('\n').reduce((sum, segment) => {
+        // Ký tự CJK (Trung/Nhật/Hàn/fullwidth) rộng gấp đôi; chữ Việt có dấu vẫn tính 1.
+        const units = [...segment].reduce((acc, ch) => acc + (ch.charCodeAt(0) > 0x2e7f ? 2 : 1), 0);
+        return sum + Math.max(1, Math.ceil(units / usable));
+      }, 0);
+      if (lines > maxLines) maxLines = lines;
+    }
+    return Math.min(MAX_PT, Math.max(MIN_PT, maxLines * LINE_PT));
   }
 
   /** Gộp kinh nghiệm VN + Đài Loan thành một cột, mỗi phần một dòng. */
