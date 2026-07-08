@@ -33,6 +33,16 @@ export class CandidatesController {
     return this.candidates.checkCccd(cccd, phone, excludeId);
   }
 
+  @Get('check-duplicate')
+  checkDuplicate(
+    @Query('name') name?: string,
+    @Query('dob') dob?: string,
+    @Query('hometown') hometown?: string,
+    @Query('excludeId') excludeId?: string,
+  ) {
+    return this.candidates.checkDuplicateProfile(name, dob, hometown, excludeId);
+  }
+
   @Get(':id')
   async get(@Param('id') id: string) {
     return { data: await this.candidates.get(id) };

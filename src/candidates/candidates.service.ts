@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { CandidateStatus, Prisma } from '@prisma/client';
 import { CandidateCodesService } from '../candidate-codes/candidate-codes.service';
 import { AuthUser } from '../common/types';
@@ -139,6 +139,7 @@ export class CandidatesService {
     const brokerId = this.stringValue(data.brokerId);
     const factoryId = this.stringValue(data.factoryId);
     await this.validateBrokerFactory(brokerId, factoryId);
+    await this.assertNoTripleDuplicate(data);
     await this.validateRequestedTeam(teamCode);
     const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || null;
     if (!resolvedTeamCode) throw new BadRequestException('Vui long chon ma to ho so (Team Code)');
@@ -256,6 +257,7 @@ export class CandidatesService {
     const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
     const formSnapshot = this.takeFormSnapshot(data);
     delete data.draftSessionId;
+    await this.assertNoTripleDuplicate(data, id);
     await this.validateRequestedTeam(teamCode);
     const resolvedTeamCode = teamCode ? normalizeTeamCode(teamCode) : existing.teamCode;
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
@@ -293,6 +295,7 @@ export class CandidatesService {
     if (!this.stringValue(data.vietnameseName) || data.vietnameseName === DRAFT_PLACEHOLDER_NAME) {
       throw new BadRequestException('Vui long nhap ho ten ung vien');
     }
+    await this.assertNoTripleDuplicate(data, id);
     await this.validateRequestedTeam(teamCode);
     const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
     if (!resolvedTeamCode) throw new BadRequestException('Vui long chon ma to ho so (Team Code)');
@@ -364,6 +367,48 @@ export class CandidatesService {
     const vn = this.stringValue(data.vietnameseName) ?? (fallbackName ? fallbackName : null);
     const cn = this.stringValue(data.chineseName);
     return buildCandidateNameSearch([vn, cn]) || null;
+  }
+
+  // Chuẩn hoá để so trùng: bỏ hoa/thường + gộp khoảng trắng, GIỮ dấu tiếng Việt.
+  private normName(value: unknown) {
+    return this.stringValue(value)?.trim().replace(/\s+/g, ' ').toLowerCase() ?? '';
+  }
+
+  // Tìm hồ sơ (đã hoàn tất) trùng cả 3: họ tên + ngày sinh + quê quán (address).
+  private async findTripleDuplicate(name: string, dob: string, hometown: string, excludeId?: string) {
+    const dobTrim = dob.trim();
+    if (!name.trim() || !dobTrim || !hometown.trim()) return null;
+    const rows = await this.prisma.candidate.findMany({
+      where: {
+        dateOfBirth: dobTrim,
+        status: { not: 'DRAFT' },
+        ...(excludeId ? { NOT: { id: excludeId } } : {}),
+      },
+      select: { id: true, vietnameseName: true, address: true, candidateCode: true },
+    });
+    const n = this.normName(name);
+    const h = this.normName(hometown);
+    return rows.find((r) => this.normName(r.vietnameseName) === n && this.normName(r.address) === h) ?? null;
+  }
+
+  // Chặn lưu khi trùng cả 3 trường. Gọi ở create/update/complete (không dùng cho draft).
+  private async assertNoTripleDuplicate(data: Record<string, unknown>, excludeId?: string) {
+    const match = await this.findTripleDuplicate(
+      this.stringValue(data.vietnameseName) ?? '',
+      this.stringValue(data.dateOfBirth) ?? '',
+      this.stringValue(data.address) ?? '',
+      excludeId,
+    );
+    if (match) {
+      const code = match.candidateCode ? ` (ma ${match.candidateCode})` : '';
+      throw new ConflictException(`Da ton tai ho so trung Ho ten + Ngay sinh + Que quan${code}`);
+    }
+  }
+
+  // Cảnh báo FE: trả về hồ sơ trùng cả 3 (nếu có) để hiển thị trước khi lưu.
+  async checkDuplicateProfile(name?: string, dob?: string, hometown?: string, excludeId?: string) {
+    const match = await this.findTripleDuplicate(name ?? '', dob ?? '', hometown ?? '', excludeId);
+    return { duplicate: !!match, match: match ?? null };
   }
 
   async checkCccd(cccd?: string, phone?: string, excludeId?: string) {

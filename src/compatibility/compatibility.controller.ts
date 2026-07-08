@@ -188,6 +188,17 @@ export class CompatibilityController {
     return this.candidates.checkCccd(cccd, phone, excludeId);
   }
 
+  @Get('candidates/check-duplicate')
+  @UseGuards(AuthGuard)
+  checkDuplicate(
+    @Query('name') name?: string,
+    @Query('dob') dob?: string,
+    @Query('hometown') hometown?: string,
+    @Query('excludeId') excludeId?: string,
+  ) {
+    return this.candidates.checkDuplicateProfile(name, dob, hometown, excludeId);
+  }
+
   @Get('candidates/:id')
   @UseGuards(AuthGuard)
   getCandidate(@Param('id') id: string) {
