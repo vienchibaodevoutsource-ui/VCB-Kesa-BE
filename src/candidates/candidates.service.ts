@@ -7,6 +7,8 @@ import { buildCandidateNameSearch, normalizeSearch } from '../common/utils/norma
 import { normalizeTeamCode, validateTeamCodeFormat } from '../common/utils/team-code';
 import { FormsService } from '../forms/forms.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { UploadsService } from '../uploads/uploads.service';
+import { sanitizeImageValues } from '../common/utils/image-sanitizer';
 
 const candidateInclude = {
   familyMembers: true,
@@ -52,9 +54,35 @@ const candidateListSelect = {
   domesticExperience: true,
   overseasExperience: true,
   note: true,
-  formDataJson: true,
-  formSnapshot: { select: { data: true } },
+  // KHÔNG select formDataJson / formSnapshot.data ở đây: 2 cột này nhúng ảnh base64
+  // (mỗi hồ sơ tới ~25MB). Đọc nguyên blob mỗi lần list = đốt egress Supabase.
+  // 4 trường hiển thị (mathScore/beanCount/lensCheck/shiftChoice) được trích riêng
+  // ở tầng Postgres qua fetchCompactListFormData() nên chỉ truyền vài byte.
 } as const;
+
+// Endpoint "lấy toàn bộ hồ sơ" (không phân trang) phục vụ dashboard + trang xuất danh sách.
+// Các trang này chỉ dùng field text nhẹ, nên tuyệt đối KHÔNG kèm base64/ảnh/snapshot.
+const candidateAllSelect = {
+  id: true,
+  candidateCode: true,
+  vietnameseName: true,
+  chineseName: true,
+  company: true,
+  broker: { select: { name: true } },
+  factory: { select: { name: true } },
+  gender: true,
+  dateOfBirth: true,
+  age: true,
+  height: true,
+  weight: true,
+  education: true,
+  maritalStatus: true,
+  address: true,
+  createdAt: true,
+} as const;
+
+// Các khóa nhỏ cần trích từ JSON form (riêng biểu mẫu Vĩnh Thắng) để hiển thị ở bảng danh sách.
+const COMPACT_LIST_KEYS = ['mathScore', 'beanCount', 'lensCheck', 'shiftChoice'] as const;
 const DRAFT_PLACEHOLDER_NAME = '(Dang nhap)';
 
 // Candidate writes embed base64 images (payload up to ~25MB), so the candidate
@@ -79,6 +107,7 @@ export class CandidatesService {
     private readonly prisma: PrismaService,
     private readonly codes: CandidateCodesService,
     private readonly forms: FormsService,
+    private readonly uploads: UploadsService,
   ) {}
 
   // Wrap candidate write transactions with an extended timeout (see CANDIDATE_TX_OPTIONS).
@@ -95,13 +124,14 @@ export class CandidatesService {
       return {
         data: await this.prisma.candidate.findMany({
           orderBy: { createdAt: 'desc' },
-          include: candidateInclude,
+          select: candidateAllSelect,
         }),
       };
     }
 
     const page = Math.max(1, Number.parseInt(String(query.page ?? '1'), 10) || 1);
-    const pageSize = Math.min(5000, Math.max(1, Number.parseInt(String(query.pageSize ?? '10'), 10) || 10));
+    // FE chỉ chọn tối đa 50 bản/trang; giới hạn 200 để tránh 1 request kéo quá nhiều dữ liệu.
+    const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(query.pageSize ?? '10'), 10) || 10));
     const sortBy = String(query.sortBy ?? 'newest');
     const where = await this.buildWhere(query);
     const orderBy = this.buildOrderBy(sortBy);
@@ -115,16 +145,66 @@ export class CandidatesService {
       includeStats ? this.getStats() : Promise.resolve(null),
     ]);
 
+    const compactMap = await this.fetchCompactListFormData(data.map((c) => c.id));
+
     return {
       data: data.map((candidate) => ({
         ...candidate,
-        formDataJson: this.compactListFormData(this.snapshotString(candidate.formSnapshot?.data) ?? candidate.formDataJson),
+        formDataJson: compactMap.get(candidate.id) ?? null,
       })),
       total,
       page: safePage,
       pageSize,
       ...(stats ? { stats } : {}),
     };
+  }
+
+  // Trích 4 khóa nhỏ từ JSON form NGAY TRÊN Postgres (toán tử ->>) thay vì kéo cả cột
+  // formDataJson/snapshot.data (nhúng base64) về BE. Nhờ vậy egress chỉ vài byte/hồ sơ.
+  // Ưu tiên snapshot.data (jsonb, luôn hợp lệ); rơi về formDataJson cho hồ sơ cũ chưa có snapshot.
+  private async fetchCompactListFormData(ids: string[]): Promise<Map<string, string | null>> {
+    const result = new Map<string, string | null>();
+    if (ids.length === 0) return result;
+
+    const buildCompact = (row: Record<string, string | null>) => {
+      const compact: Record<string, string | null> = {};
+      let hasValue = false;
+      for (const key of COMPACT_LIST_KEYS) {
+        const value = row[key];
+        compact[key] = value ?? null;
+        if (value !== null && value !== undefined && String(value).trim()) hasValue = true;
+      }
+      return hasValue ? JSON.stringify(compact) : null;
+    };
+
+    try {
+      const snapRows = await this.prisma.$queryRaw<Array<Record<string, string | null>>>(Prisma.sql`
+        SELECT "candidateId" AS id,
+               "data"->>'mathScore'   AS "mathScore",
+               "data"->>'beanCount'   AS "beanCount",
+               "data"->>'lensCheck'   AS "lensCheck",
+               "data"->>'shiftChoice' AS "shiftChoice"
+        FROM "CandidateFormSnapshot"
+        WHERE "candidateId" IN (${Prisma.join(ids)})
+      `);
+      for (const row of snapRows) {
+        if (row.id) result.set(row.id, buildCompact(row));
+      }
+    } catch {
+      // Nếu truy vấn trích JSON lỗi, bỏ qua 4 field phụ — danh sách vẫn hiển thị bình thường.
+    }
+
+    // Hồ sơ cũ chưa có snapshot: đọc formDataJson (text) chỉ cho những id còn thiếu.
+    const missing = ids.filter((id) => !result.has(id));
+    if (missing.length) {
+      const legacy = await this.prisma.candidate.findMany({
+        where: { id: { in: missing } },
+        select: { id: true, formDataJson: true },
+      });
+      for (const row of legacy) result.set(row.id, this.compactListFormData(row.formDataJson));
+    }
+
+    return result;
   }
 
   async get(id: string) {
@@ -135,7 +215,7 @@ export class CandidatesService {
 
   async create(body: Record<string, unknown>, user: AuthUser) {
     const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
-    const formSnapshot = this.takeFormSnapshot(data);
+    const formSnapshot = await this.sanitizeWriteImages(data, this.takeFormSnapshot(data));
     const brokerId = this.stringValue(data.brokerId);
     const factoryId = this.stringValue(data.factoryId);
     await this.validateBrokerFactory(brokerId, factoryId);
@@ -172,7 +252,7 @@ export class CandidatesService {
   }
 
   async createDraft(body: Record<string, unknown>, user: AuthUser) {
-    const formSnapshot = this.takeFormSnapshot(body);
+    const formSnapshot = await this.sanitizeWriteImages(null, this.takeFormSnapshot(body));
     const requestedTeam = typeof body.teamCode === 'string' ? body.teamCode : undefined;
     await this.validateRequestedTeam(requestedTeam);
     const resolvedTeamCode = (await this.resolveTeamForCode(requestedTeam, user)) || null;
@@ -216,7 +296,7 @@ export class CandidatesService {
     }
 
     const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
-    const formSnapshot = this.takeFormSnapshot(data);
+    const formSnapshot = await this.sanitizeWriteImages(data, this.takeFormSnapshot(data));
     delete data.status;
     delete data.draftSessionId;
 
@@ -255,7 +335,7 @@ export class CandidatesService {
     if (!existing) throw new NotFoundException('Not found');
     this.assertCanEdit(existing, user);
     const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
-    const formSnapshot = this.takeFormSnapshot(data);
+    const formSnapshot = await this.sanitizeWriteImages(data, this.takeFormSnapshot(data));
     delete data.draftSessionId;
     await this.assertNoTripleDuplicate(data, id);
     await this.validateRequestedTeam(teamCode);
@@ -289,7 +369,7 @@ export class CandidatesService {
     }
 
     const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
-    const formSnapshot = this.takeFormSnapshot(data);
+    const formSnapshot = await this.sanitizeWriteImages(data, this.takeFormSnapshot(data));
     delete data.status;
     delete data.draftSessionId;
     if (!this.stringValue(data.vietnameseName) || data.vietnameseName === DRAFT_PLACEHOLDER_NAME) {
@@ -511,6 +591,33 @@ export class CandidatesService {
       company: this.stringValue(data.company),
     });
     return { raw, parsed: normalized.data, formType: normalized.formType };
+  }
+
+  // Chặn ảnh base64 lọt vào DB: đẩy lên Supabase Storage rồi thay bằng URL, cho CẢ cột candidate
+  // (avatarUrl/lineImageUrl/…) lẫn snapshot JSON. Cache chung để ảnh xuất hiện ở cả hai chỉ upload 1 lần.
+  // Upload lỗi thì giữ nguyên base64 (không làm hỏng thao tác lưu hồ sơ khi Storage gặp sự cố).
+  private async sanitizeWriteImages<S extends { parsed: Prisma.InputJsonValue } | null>(
+    data: Record<string, unknown> | null,
+    snapshot: S,
+    candidateId = 'temp',
+  ): Promise<S> {
+    if (!this.uploads.isConfigured()) return snapshot;
+    const cache = new Map<string, string>();
+    const upload = async (uri: string) => {
+      try {
+        return await this.uploads.uploadDataUri(uri, { type: 'legacy', candidateId });
+      } catch {
+        return uri; // giữ base64 thay vì để lưu hồ sơ thất bại
+      }
+    };
+    if (data) {
+      for (const [key, value] of Object.entries(data)) {
+        data[key] = await sanitizeImageValues(value, upload, cache);
+      }
+    }
+    if (!snapshot) return snapshot;
+    const parsed = (await sanitizeImageValues(snapshot.parsed, upload, cache)) as Prisma.InputJsonValue;
+    return { ...snapshot, parsed };
   }
 
   private async upsertFormSnapshot(
