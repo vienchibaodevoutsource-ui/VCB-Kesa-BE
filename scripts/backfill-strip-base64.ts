@@ -16,6 +16,7 @@
 import { PrismaClient } from '@prisma/client';
 import { createClient } from '@supabase/supabase-js';
 import { sanitizeImageValues } from '../src/common/utils/image-sanitizer';
+import { compressImage } from '../src/common/utils/compress-image';
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -33,13 +34,25 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { persistS
 
 let uploaded = 0;
 let uploadFailed = 0;
+let bytesMigrated = 0; // tổng byte ảnh base64 sẽ chuyển sang Storage (ước lượng tăng Storage)
+
+const fmtMB = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 
 async function uploadDataUri(dataUri: string, candidateId: string): Promise<string> {
   const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/.exec(dataUri.trim());
   if (!match) return dataUri;
-  const contentType = match[1];
-  const buffer = Buffer.from(match[2], 'base64');
-  const ext = contentType.split('/')[1]?.split('+')[0] || 'jpg';
+  const rawBuffer = Buffer.from(match[2], 'base64');
+  // Nén luôn khi backfill: ảnh base64 cũ thường rất nặng, nén giúp Storage không vỡ quota.
+  const compressed = await compressImage(rawBuffer);
+  const buffer = compressed?.buffer ?? rawBuffer;
+  const contentType = compressed?.contentType ?? match[1];
+  const ext = compressed?.ext ?? match[1].split('/')[1]?.split('+')[0] ?? 'jpg';
+  bytesMigrated += buffer.length; // đo theo dung lượng SAU nén = mức Storage thực tăng
+
+  // DRY-RUN: chỉ đo, KHÔNG đẩy file lên Storage. Trả URL giả (khác chuỗi gốc) để sanitizer
+  // vẫn đếm là "đã thay" phục vụ báo cáo; do DRY_RUN không ghi DB nên URL giả không lưu đâu cả.
+  if (DRY_RUN) return `dryrun://would-upload/${candidateId}`;
+
   const path = `backfill/${candidateId}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
   const { error } = await supabase.storage
     .from(BUCKET)
@@ -141,8 +154,13 @@ async function main() {
   console.log(`Backfill strip base64 → Storage (bucket: ${BUCKET})${DRY_RUN ? ' [DRY-RUN]' : ''}`);
   await processCandidates();
   await processSnapshots();
-  console.log(`\nTổng: upload thành công ${uploaded}, upload lỗi ${uploadFailed}.`);
-  if (DRY_RUN) console.log('DRY-RUN: chưa ghi gì vào DB.');
+  console.log(`\nDung lượng base64 (ảnh duy nhất) cần chuyển sang Storage: ~${fmtMB(bytesMigrated)}`);
+  console.log('  → Đây là mức Storage sẽ TĂNG. Free tier Storage = 1GB; kiểm tra còn đủ chỗ trước khi chạy thật.');
+  if (DRY_RUN) {
+    console.log('DRY-RUN: chưa upload / chưa ghi DB. Bỏ cờ --dry-run để chạy thật.');
+  } else {
+    console.log(`Tổng: upload thành công ${uploaded}, upload lỗi ${uploadFailed}.`);
+  }
 }
 
 main()

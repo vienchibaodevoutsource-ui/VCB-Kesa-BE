@@ -409,8 +409,39 @@ export class CandidatesService {
   }
 
   async remove(id: string) {
+    // Gom URL ảnh (cột + snapshot) TRƯỚC khi xoá row để còn dọn file trong Storage, tránh mồ côi.
+    const doomed = await this.prisma.candidate.findUnique({
+      where: { id },
+      select: {
+        avatarUrl: true,
+        lineImageUrl: true,
+        limbImages: true,
+        scarImages: true,
+        tattooImages: true,
+        formSnapshot: { select: { data: true } },
+      },
+    });
     await this.prisma.candidate.delete({ where: { id } });
+    if (doomed) {
+      const urls = [
+        doomed.avatarUrl,
+        doomed.lineImageUrl,
+        ...(doomed.limbImages ?? []),
+        ...(doomed.scarImages ?? []),
+        ...(doomed.tattooImages ?? []),
+        ...this.extractStorageUrls(doomed.formSnapshot?.data),
+      ];
+      // Best-effort: lỗi dọn Storage không được chặn việc xoá hồ sơ.
+      void this.uploads.removeByUrls(urls).catch((err) => console.warn('[candidates.remove] dọn Storage lỗi', err));
+    }
     return { success: true };
+  }
+
+  // Trích mọi public URL Supabase Storage nằm trong snapshot JSON (bỏ qua base64 / text khác).
+  private extractStorageUrls(data: Prisma.JsonValue | null | undefined): string[] {
+    if (data === null || data === undefined) return [];
+    const matches = JSON.stringify(data).match(/https?:\/\/[^"'\\ ]+\/object\/public\/[^"'\\ ]+/g);
+    return matches ?? [];
   }
 
   // Kiểm duyệt / bỏ kiểm duyệt hồ sơ. Chỉ Admin hoặc tài khoản được cấp quyền (canModerate) mới được phép.

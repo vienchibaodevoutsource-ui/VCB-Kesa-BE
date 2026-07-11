@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseClient, createClient } from '@supabase/supabase-js';
+import { compressImage } from '../common/utils/compress-image';
 import { UploadedFile } from '../common/types/uploaded-file';
 
 // Chỉ chấp nhận vài loại ảnh thường gặp để tránh lưu file lạ vào Storage.
@@ -47,14 +48,36 @@ export class UploadsService {
     const { supabase, bucket } = this.client();
     const type = opts.type || 'avatar';
     const candidateId = opts.candidateId || 'temp';
-    const ext = opts.ext || contentType.split('/')[1]?.split('+')[0] || 'jpg';
+
+    const compressed = await compressImage(buffer);
+    const finalBuffer = compressed?.buffer ?? buffer;
+    const finalType = compressed?.contentType ?? contentType;
+    const ext = compressed?.ext ?? opts.ext ?? contentType.split('/')[1]?.split('+')[0] ?? 'jpg';
+
     const path = `${type}/${candidateId}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
     const { error } = await supabase.storage
       .from(bucket)
-      .upload(path, buffer, { contentType, cacheControl: '3600', upsert: false });
+      .upload(path, finalBuffer, { contentType: finalType, cacheControl: '3600', upsert: false });
     if (error) throw new InternalServerErrorException(error.message);
     const { data } = supabase.storage.from(bucket).getPublicUrl(path);
     return data.publicUrl;
+  }
+
+  /** Xoá các file trong bucket theo public URL (bỏ qua base64 / URL ngoài bucket). Best-effort. */
+  async removeByUrls(urls: (string | null | undefined)[]) {
+    if (!this.isConfigured()) return;
+    const { supabase, bucket } = this.client();
+    const marker = `/object/public/${bucket}/`;
+    const paths = Array.from(
+      new Set(
+        urls
+          .filter((u): u is string => typeof u === 'string' && u.includes(marker))
+          .map((u) => decodeURIComponent(u.slice(u.indexOf(marker) + marker.length).split('?')[0])),
+      ),
+    );
+    if (!paths.length) return;
+    const { error } = await supabase.storage.from(bucket).remove(paths);
+    if (error) console.warn(`[uploads] removeByUrls lỗi: ${error.message}`);
   }
 
   private client(): { supabase: SupabaseClient; bucket: string } {
