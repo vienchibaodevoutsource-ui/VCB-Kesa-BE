@@ -65,6 +65,7 @@ const candidateListSelect = {
 const candidateAllSelect = {
   id: true,
   candidateCode: true,
+  teamCode: true,
   vietnameseName: true,
   chineseName: true,
   company: true,
