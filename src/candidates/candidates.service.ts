@@ -486,10 +486,10 @@ export class CandidatesService {
     return this.stringValue(value)?.trim().replace(/\s+/g, ' ').toLowerCase() ?? '';
   }
 
-  // Tìm hồ sơ (đã hoàn tất) trùng cả 3: họ tên + ngày sinh + quê quán (address).
-  private async findTripleDuplicate(name: string, dob: string, hometown: string, excludeId?: string) {
+  // Tìm hồ sơ (đã hoàn tất) trùng: họ tên + ngày sinh. (Quê quán không còn là điều kiện.)
+  private async findTripleDuplicate(name: string, dob: string, _hometown: string, excludeId?: string) {
     const dobTrim = dob.trim();
-    if (!name.trim() || !dobTrim || !hometown.trim()) return null;
+    if (!name.trim() || !dobTrim) return null;
     const rows = await this.prisma.candidate.findMany({
       where: {
         dateOfBirth: dobTrim,
@@ -499,11 +499,10 @@ export class CandidatesService {
       select: { id: true, vietnameseName: true, address: true, candidateCode: true },
     });
     const n = this.normName(name);
-    const h = this.normName(hometown);
-    return rows.find((r) => this.normName(r.vietnameseName) === n && this.normName(r.address) === h) ?? null;
+    return rows.find((r) => this.normName(r.vietnameseName) === n) ?? null;
   }
 
-  // Chặn lưu khi trùng cả 3 trường. Gọi ở create/update/complete (không dùng cho draft).
+  // Chặn lưu khi trùng họ tên + ngày sinh. Gọi ở create/update/complete (không dùng cho draft).
   private async assertNoTripleDuplicate(data: Record<string, unknown>, excludeId?: string) {
     const match = await this.findTripleDuplicate(
       this.stringValue(data.vietnameseName) ?? '',
@@ -513,11 +512,11 @@ export class CandidatesService {
     );
     if (match) {
       const code = match.candidateCode ? ` (ma ${match.candidateCode})` : '';
-      throw new ConflictException(`Da ton tai ho so trung Ho ten + Ngay sinh + Que quan${code}`);
+      throw new ConflictException(`Da ton tai ho so trung Ho ten + Ngay sinh${code}`);
     }
   }
 
-  // Cảnh báo FE: trả về hồ sơ trùng cả 3 (nếu có) để hiển thị trước khi lưu.
+  // Cảnh báo FE: trả về hồ sơ trùng họ tên + ngày sinh (nếu có) để hiển thị trước khi lưu.
   async checkDuplicateProfile(name?: string, dob?: string, hometown?: string, excludeId?: string) {
     const match = await this.findTripleDuplicate(name ?? '', dob ?? '', hometown ?? '', excludeId);
     return { duplicate: !!match, match: match ?? null };
