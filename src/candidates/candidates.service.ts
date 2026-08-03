@@ -303,7 +303,10 @@ export class CandidatesService {
 
     let generatedCode: string | undefined;
     await this.validateRequestedTeam(teamCode);
-    const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
+    const teamForNewCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
+    // Đã có mã → tổ bám tiền tố mã (chống trôi); chưa có mã → dùng tổ trên để sinh mã mới.
+    const knownCode = existing.candidateCode ?? this.stringValue(data.candidateCode);
+    const resolvedTeamCode = this.teamPrefixFromCode(knownCode) ?? teamForNewCode;
 
     if (!existing.candidateCode && !data.candidateCode) {
       if (resolvedTeamCode) generatedCode = await this.codes.generateCandidateCode(resolvedTeamCode);
@@ -340,7 +343,10 @@ export class CandidatesService {
     delete data.draftSessionId;
     await this.assertNoTripleDuplicate(data, id);
     await this.validateRequestedTeam(teamCode);
-    const resolvedTeamCode = teamCode ? normalizeTeamCode(teamCode) : existing.teamCode;
+    // Đã có mã hồ sơ → tổ luôn bám tiền tố mã (chống trôi theo tổ người sửa); chưa có mã → theo yêu cầu/cột cũ.
+    const storedCode = this.stringValue(data.candidateCode) ?? existing.candidateCode;
+    const resolvedTeamCode =
+      this.teamPrefixFromCode(storedCode) ?? (teamCode ? normalizeTeamCode(teamCode) : existing.teamCode);
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
     return this.candidateTx(async (tx) => {
       const candidate = await tx.candidate.update({
@@ -378,7 +384,10 @@ export class CandidatesService {
     }
     await this.assertNoTripleDuplicate(data, id);
     await this.validateRequestedTeam(teamCode);
-    const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
+    const teamForNewCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
+    // Đã có mã → tổ bám tiền tố mã (chống trôi); chưa có mã → dùng tổ trên để sinh mã mới.
+    const knownCode = existing.candidateCode ?? this.stringValue(data.candidateCode);
+    const resolvedTeamCode = this.teamPrefixFromCode(knownCode) ?? teamForNewCode;
     if (!resolvedTeamCode) throw new BadRequestException('Vui long chon ma to ho so (Team Code)');
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
 
@@ -577,6 +586,17 @@ export class CandidatesService {
     if (user.teamCode) return user.teamCode;
     const row = await this.prisma.user.findUnique({ where: { id: user.id }, select: { teamCode: true } });
     return row?.teamCode ?? null;
+  }
+
+  /**
+   * Tổ suy từ tiền tố mã hồ sơ (candidateCode = TEAM + số, vd "KSV07" → "KSV").
+   * Mã bất biến sau khi cấp nên là nguồn sự thật của tổ: khi hồ sơ ĐÃ có mã, cột
+   * teamCode phải bám theo tiền tố này, tránh bị ghi đè theo tổ của người sửa
+   * (nguyên nhân card "Số hồ sơ theo tổ" đếm dồn hết vào tổ của người sửa).
+   */
+  private teamPrefixFromCode(code: string | null | undefined): string | null {
+    const prefix = typeof code === 'string' ? code.trim().replace(/\d+$/, '').replace(/-+$/, '') : '';
+    return prefix ? normalizeTeamCode(prefix) : null;
   }
 
   private cleanCandidatePayload(body: Record<string, unknown>) {
