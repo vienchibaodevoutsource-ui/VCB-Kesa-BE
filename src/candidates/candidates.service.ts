@@ -441,17 +441,20 @@ export class CandidatesService {
         ...(doomed.tattooImages ?? []),
         ...this.extractStorageUrls(doomed.formSnapshot?.data),
       ];
-      // Best-effort: lỗi dọn Storage không được chặn việc xoá hồ sơ.
-      void this.uploads.removeByUrls(urls).catch((err) => console.warn('[candidates.remove] dọn Storage lỗi', err));
+      // Best-effort: lỗi dọn ảnh không được chặn việc xoá hồ sơ.
+      void this.uploads.removeByUrls(urls).catch((err) => console.warn('[candidates.remove] dọn ảnh lỗi', err));
     }
     return { success: true };
   }
 
-  // Trích mọi public URL Supabase Storage nằm trong snapshot JSON (bỏ qua base64 / text khác).
+  // Trích mọi public URL ảnh nằm trong snapshot JSON (bỏ qua base64 / text khác).
+  // Nhận cả URL Cloudinary (nơi lưu hiện tại) lẫn URL Supabase Storage của hồ sơ cũ.
   private extractStorageUrls(data: Prisma.JsonValue | null | undefined): string[] {
     if (data === null || data === undefined) return [];
-    const matches = JSON.stringify(data).match(/https?:\/\/[^"'\\ ]+\/object\/public\/[^"'\\ ]+/g);
-    return matches ?? [];
+    const json = JSON.stringify(data);
+    const cloudinary = json.match(/https?:\/\/res\.cloudinary\.com\/[^"'\\ ]+/g) ?? [];
+    const supabase = json.match(/https?:\/\/[^"'\\ ]+\/object\/public\/[^"'\\ ]+/g) ?? [];
+    return [...cloudinary, ...supabase];
   }
 
   // Kiểm duyệt / bỏ kiểm duyệt hồ sơ. Chỉ Admin hoặc tài khoản được cấp quyền (canModerate) mới được phép.
@@ -644,9 +647,9 @@ export class CandidatesService {
     return { raw, parsed: normalized.data, formType: normalized.formType };
   }
 
-  // Chặn ảnh base64 lọt vào DB: đẩy lên Supabase Storage rồi thay bằng URL, cho CẢ cột candidate
+  // Chặn ảnh base64 lọt vào DB: đẩy lên Cloudinary rồi thay bằng URL, cho CẢ cột candidate
   // (avatarUrl/lineImageUrl/…) lẫn snapshot JSON. Cache chung để ảnh xuất hiện ở cả hai chỉ upload 1 lần.
-  // Upload lỗi thì giữ nguyên base64 (không làm hỏng thao tác lưu hồ sơ khi Storage gặp sự cố).
+  // Upload lỗi thì giữ nguyên base64 (không làm hỏng thao tác lưu hồ sơ khi Cloudinary gặp sự cố).
   private async sanitizeWriteImages<S extends { parsed: Prisma.InputJsonValue } | null>(
     data: Record<string, unknown> | null,
     snapshot: S,

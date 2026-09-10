@@ -14,4 +14,9 @@ export class UploadsController {
   async image(@UploadedFile() file: UploadedFileType, @Body() body: Record<string, string>) {
     return { data: await this.uploads.uploadImage(file, body) };
   }
+
+  @Post('images/delete')
+  async removeImage(@Body() body: { url?: string }) {
+    return { data: await this.uploads.removeByUrl(body?.url) };
+  }
 }
