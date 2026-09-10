@@ -261,6 +261,12 @@ export class CompatibilityController {
     return this.uploads.uploadImage(file, body);
   }
 
+  @Post('delete-image')
+  @UseGuards(AuthGuard)
+  async deleteImage(@Body() body: { url?: string }) {
+    return this.uploads.removeByUrl(body?.url);
+  }
+
   @Post('export-docx')
   @UseGuards(AuthGuard)
   async exportDocx(@Body() body: Record<string, unknown>, @Res() response: Response) {
