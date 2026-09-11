@@ -30,6 +30,11 @@ async function bootstrap() {
   );
   app.useGlobalFilters(new HttpExceptionFilter());
 
+  // Chạy trong container: Docker gửi SIGTERM rồi chờ 10 giây mới giết cưỡng bức.
+  // Không bắt tín hiệu thì tiến trình bị giết giữa chừng (mã thoát 137) và Prisma
+  // không kịp đóng kết nối. enableShutdownHooks cho onModuleDestroy được gọi.
+  app.enableShutdownHooks();
+
   await app.listen(config.get<number>('PORT') || 4000);
 }
 

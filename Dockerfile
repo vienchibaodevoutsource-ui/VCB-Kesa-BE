@@ -22,4 +22,6 @@ COPY --from=build /app/templates ./templates
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 EXPOSE 4000
-CMD npx prisma migrate deploy && node dist/main.js
+# Dạng JSON để tín hiệu dừng của Docker tới thẳng tiến trình, không bị shell nuốt.
+# exec cho node thay chỗ shell, nhờ đó SIGTERM tới đúng ứng dụng và nó đóng kết nối tử tế.
+CMD ["sh", "-c", "npx prisma migrate deploy && exec node dist/main.js"]
