@@ -7,3 +7,4 @@ dist
 coverage
 *.tsbuildinfo
 .env.migrate2
+.env.backup*
