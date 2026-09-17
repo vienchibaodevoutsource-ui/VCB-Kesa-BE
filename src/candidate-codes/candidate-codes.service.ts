@@ -14,13 +14,13 @@ export class CandidateCodesService {
         GREATEST(
           COALESCE((
             SELECT MAX((substring("candidateCode" from '([0-9]+)$'))::integer)
-            FROM "Candidate"
+            FROM "kesa"."Candidate"
             WHERE "candidateCode" IS NOT NULL
               AND "candidateCode" ~ '[0-9]+$'
           ), 0),
           COALESCE((
             SELECT MAX("count")
-            FROM "CandidateCounter"
+            FROM "kesa"."CandidateCounter"
           ), 0)
         ) + 1 AS next_number
     `;
@@ -34,23 +34,23 @@ export class CandidateCodesService {
           GREATEST(
             COALESCE((
               SELECT MAX((substring("candidateCode" from '([0-9]+)$'))::integer)
-              FROM "Candidate"
+              FROM "kesa"."Candidate"
               WHERE "candidateCode" IS NOT NULL
                 AND "candidateCode" ~ '[0-9]+$'
             ), 0),
             COALESCE((
               SELECT MAX("count")
-              FROM "CandidateCounter"
+              FROM "kesa"."CandidateCounter"
             ), 0)
           ) AS max_number
       ),
       upserted AS (
-        INSERT INTO "CandidateCounter" ("id", "teamCode", "count", "updatedAt")
+        INSERT INTO "kesa"."CandidateCounter" ("id", "teamCode", "count", "updatedAt")
         SELECT gen_random_uuid()::text, ${GLOBAL_COUNTER_KEY}, max_number + 1, CURRENT_TIMESTAMP
         FROM max_existing
         ON CONFLICT ("teamCode") DO UPDATE
         SET
-          "count" = GREATEST("CandidateCounter"."count", (SELECT max_number FROM max_existing)) + 1,
+          "count" = GREATEST("kesa"."CandidateCounter"."count", (SELECT max_number FROM max_existing)) + 1,
           "updatedAt" = CURRENT_TIMESTAMP
         RETURNING "count"
       )

@@ -185,7 +185,7 @@ export class CandidatesService {
                "data"->>'beanCount'   AS "beanCount",
                "data"->>'lensCheck'   AS "lensCheck",
                "data"->>'shiftChoice' AS "shiftChoice"
-        FROM "CandidateFormSnapshot"
+        FROM "kesa"."CandidateFormSnapshot"
         WHERE "candidateId" IN (${Prisma.join(ids)})
       `);
       for (const row of snapRows) {
