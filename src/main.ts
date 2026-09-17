@@ -29,6 +29,7 @@ async function bootstrap() {
     }),
   );
   app.useGlobalFilters(new HttpExceptionFilter());
+  app.enableShutdownHooks();
 
   await app.listen(config.get<number>('PORT') || 4000);
 }

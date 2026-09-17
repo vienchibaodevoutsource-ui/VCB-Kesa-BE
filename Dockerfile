@@ -22,4 +22,4 @@ COPY --from=build /app/templates ./templates
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 EXPOSE 4000
-CMD npx prisma migrate deploy && node dist/main.js
+CMD ["sh", "-c", "timeout 60 npx prisma migrate deploy && exec node dist/main.js"]
