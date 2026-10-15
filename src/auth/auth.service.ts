@@ -7,9 +7,18 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../common/types';
 
 export const AUTH_COOKIE = 'auth-token';
+export const SESSION_INVALID = 'Phien dang nhap khong con hop le, vui long dang nhap lai';
+
+// Token song 30 ngay nen tai khoan bi xoa hoac bi khoa van con phien hop le; phai hoi DB.
+const ACTIVE_USER_TTL_MS = 60_000;
+const ACTIVE_USER_CACHE_MAX = 1000;
 
 @Injectable()
 export class AuthService {
+  // AuthGuard chay tren moi route nen khong tra DB o tung request duoc.
+  // Giu ket qua 60 giay; xoa hoac khoa tai khoan goi invalidateUser() de co hieu luc ngay.
+  private readonly activeUserCache = new Map<string, { active: boolean; expiresAt: number }>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
@@ -69,6 +78,37 @@ export class AuthService {
     } catch {
       return null;
     }
+  }
+
+  async assertActiveUser(payload: AuthUser) {
+    const now = Date.now();
+    const cached = this.activeUserCache.get(payload.id);
+    if (cached && cached.expiresAt > now) {
+      if (!cached.active) throw new UnauthorizedException(SESSION_INVALID);
+      return;
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.id },
+      select: { isActive: true },
+    });
+    const active = Boolean(user?.isActive);
+    this.rememberActiveUser(payload.id, active, now);
+    if (!active) throw new UnauthorizedException(SESSION_INVALID);
+  }
+
+  invalidateUser(userId: string) {
+    this.activeUserCache.delete(userId);
+  }
+
+  private rememberActiveUser(userId: string, active: boolean, now: number) {
+    // Token gia co the mang id bat ky nen don cac muc het han truoc khi cache phinh to.
+    if (this.activeUserCache.size >= ACTIVE_USER_CACHE_MAX) {
+      for (const [id, entry] of this.activeUserCache) {
+        if (entry.expiresAt <= now) this.activeUserCache.delete(id);
+      }
+    }
+    this.activeUserCache.set(userId, { active, expiresAt: now + ACTIVE_USER_TTL_MS });
   }
 
   async getActiveUser(payload: AuthUser) {

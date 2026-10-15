@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import { AuthService } from '../auth/auth.service';
 import { AuthUser } from '../common/types';
 import { clampPage, isPaginatedListRequest, parsePaginationParams } from '../common/utils/pagination';
 import { normalizeTeamCode, validateTeamCodeFormat } from '../common/utils/team-code';
@@ -21,7 +22,10 @@ const userSelect = {
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auth: AuthService,
+  ) {}
 
   async list(query: Record<string, unknown>) {
     if (!isPaginatedListRequest(query)) {
@@ -90,7 +94,9 @@ export class UsersService {
     if (dto.password) data.password = await bcrypt.hash(dto.password, 10);
 
     try {
-      return await this.prisma.user.update({ where: { id }, data, select: userSelect });
+      const updated = await this.prisma.user.update({ where: { id }, data, select: userSelect });
+      if (dto.isActive !== undefined) this.auth.invalidateUser(id);
+      return updated;
     } catch (error) {
       if (this.isUniqueError(error)) throw new ConflictException('Email da ton tai');
       throw error;
@@ -99,6 +105,8 @@ export class UsersService {
 
   async remove(id: string) {
     await this.prisma.user.delete({ where: { id } });
+    // Phien dang nhap cu phai mat hieu luc ngay, khong doi cache het han.
+    this.auth.invalidateUser(id);
     return { success: true };
   }
 

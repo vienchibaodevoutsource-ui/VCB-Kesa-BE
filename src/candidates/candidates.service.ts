@@ -88,8 +88,12 @@ const DRAFT_PLACEHOLDER_NAME = '(Dang nhap)';
 
 // Candidate writes embed base64 images (payload up to ~25MB), so the candidate
 // create/update + form-snapshot upsert can exceed Prisma's default 5s interactive
-// transaction limit. Give the write transaction more room to finish.
-const CANDIDATE_TX_OPTIONS = { maxWait: 15_000, timeout: 30_000 } as const;
+// transaction limit. Ảnh đã được đẩy lên Cloudinary TRƯỚC khi mở transaction
+// (sanitizeWriteImages), nên trong transaction chỉ còn 2 câu ghi — 15s là rộng rãi.
+// Không nới thêm: transaction giữ connection suốt thời gian đó, mà pool chỉ vài chỗ,
+// nên timeout dài biến một hồ sơ lỗi thành nghẽn cả app ("Timed out fetching a new
+// connection from the connection pool").
+const CANDIDATE_TX_OPTIONS = { maxWait: 5_000, timeout: 15_000 } as const;
 
 export interface CandidateFilterOptions {
   educations: string[];
@@ -136,15 +140,36 @@ export class CandidatesService {
     const sortBy = String(query.sortBy ?? 'newest');
     const where = await this.buildWhere(query);
     const orderBy = this.buildOrderBy(sortBy);
-    const total = await this.prisma.candidate.count({ where });
-    const { page: safePage } = clampPage(page, total, pageSize);
-    const skip = (safePage - 1) * pageSize;
-
     const includeStats = query.stats !== '0';
-    const [data, stats] = await Promise.all([
-      this.prisma.candidate.findMany({ where, orderBy, skip, take: pageSize, select: candidateListSelect }),
+
+    // count chạy SONG SONG với findMany thay vì chặn trước nó: mỗi lượt đi-về qua pooler
+    // tốn vài trăm ms nên bớt được một lượt là bớt đáng kể thời gian phản hồi.
+    // Đổi lại phải đoán trang trước khi biết total; nếu trang vượt quá thì lấy lại đúng
+    // trang cuối — trường hợp hiếm nên không ảnh hưởng đường đi thường gặp.
+    const page_ = Math.max(1, page);
+    const [total, firstPass, stats] = await Promise.all([
+      this.prisma.candidate.count({ where }),
+      this.prisma.candidate.findMany({
+        where,
+        orderBy,
+        skip: (page_ - 1) * pageSize,
+        take: pageSize,
+        select: candidateListSelect,
+      }),
       includeStats ? this.getStats() : Promise.resolve(null),
     ]);
+
+    const { page: safePage } = clampPage(page_, total, pageSize);
+    const data =
+      safePage === page_
+        ? firstPass
+        : await this.prisma.candidate.findMany({
+            where,
+            orderBy,
+            skip: (safePage - 1) * pageSize,
+            take: pageSize,
+            select: candidateListSelect,
+          });
 
     const compactMap = await this.fetchCompactListFormData(data.map((c) => c.id));
 
