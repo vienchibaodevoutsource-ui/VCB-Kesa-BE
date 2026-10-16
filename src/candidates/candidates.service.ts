@@ -210,14 +210,21 @@ export class CandidatesService {
                "data"->>'beanCount'   AS "beanCount",
                "data"->>'lensCheck'   AS "lensCheck",
                "data"->>'shiftChoice' AS "shiftChoice"
-        FROM "CandidateFormSnapshot"
+        FROM ${this.prisma.table('CandidateFormSnapshot')}
         WHERE "candidateId" IN (${Prisma.join(ids)})
       `);
       for (const row of snapRows) {
         if (row.id) result.set(row.id, buildCompact(row));
       }
-    } catch {
-      // Nếu truy vấn trích JSON lỗi, bỏ qua 4 field phụ — danh sách vẫn hiển thị bình thường.
+    } catch (error) {
+      // Danh sách vẫn hiển thị được (rơi xuống nhánh đọc formDataJson bên dưới), nhưng nhánh đó
+      // nặng hơn nhiều nên lỗi ở đây biểu hiện ra ngoài thành "tải rất chậm". Đừng nuốt im lặng.
+      console.error(
+        '[candidates] trích JSON từ snapshot lỗi, phải đọc formDataJson cho',
+        ids.length,
+        'hồ sơ:',
+        error instanceof Error ? error.message : error,
+      );
     }
 
     // Hồ sơ cũ chưa có snapshot: đọc formDataJson (text) chỉ cho những id còn thiếu.
