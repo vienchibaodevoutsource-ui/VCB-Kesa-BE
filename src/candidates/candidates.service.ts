@@ -241,7 +241,14 @@ export class CandidatesService {
   }
 
   async get(id: string) {
-    const candidate = await this.prisma.candidate.findUnique({ where: { id }, include: candidateInclude });
+    // relationLoadStrategy 'join': lấy cả 6 quan hệ trong MỘT câu SQL. Mặc định ('query')
+    // phát mỗi quan hệ một câu, mà mỗi lượt đi-về qua transaction pooler tốn 300-500ms
+    // nên riêng việc mở một hồ sơ đã ngốn vài giây.
+    const candidate = await this.prisma.candidate.findUnique({
+      where: { id },
+      include: candidateInclude,
+      relationLoadStrategy: 'join',
+    });
     if (!candidate) throw new NotFoundException('Not found');
     return this.withLegacyFormDataJson(candidate);
   }
