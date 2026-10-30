@@ -776,7 +776,7 @@ export class CandidatesService {
   }
 
   private isCandidateListRequest(query: Record<string, unknown>) {
-    return ['page', 'pageSize', 'search', 'gender', 'education', 'brokerId', 'factoryId', 'fromDate', 'toDate', 'sortBy', 'status', 'draftSessionId', 'isVerified'].some(
+    return ['page', 'pageSize', 'search', 'gender', 'education', 'brokerId', 'factoryId', 'fromDate', 'toDate', 'sortBy', 'status', 'draftSessionId', 'isVerified', 'candidateCode'].some(
       (key) => query[key] !== undefined,
     );
   }
@@ -801,6 +801,11 @@ export class CandidatesService {
           { factory: { name: { contains: search, mode: 'insensitive' as const } } },
         ],
       });
+    }
+    // Lọc mã số hồ sơ: cho nhập nhiều mã cách nhau bởi dấu phẩy / khoảng trắng (khớp một phần, không phân biệt hoa-thường).
+    const codes = String(query.candidateCode ?? '').split(/[\s,;]+/).filter(Boolean);
+    if (codes.length) {
+      and.push({ OR: codes.map((code) => ({ candidateCode: { contains: code, mode: 'insensitive' as const } })) });
     }
     if (query.gender) and.push({ gender: String(query.gender) });
     if (query.education) and.push({ education: String(query.education) });
