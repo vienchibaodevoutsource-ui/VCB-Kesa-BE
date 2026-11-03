@@ -12,6 +12,8 @@ export class AuthGuard implements CanActivate {
     const token = request.cookies?.[AUTH_COOKIE] || bearer;
     const payload = await this.auth.verifyToken(token);
     if (!payload) throw new UnauthorizedException('Unauthorized');
+    // Chu ky hop le chua du: tai khoan co the da bi xoa hoac bi khoa sau khi token duoc cap.
+    await this.auth.assertActiveUser(payload);
     request.user = payload;
     return true;
   }

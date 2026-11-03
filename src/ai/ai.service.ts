@@ -10,8 +10,12 @@ import { createHash } from 'crypto';
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_BALANCE_URL = 'https://api.deepseek.com/user/balance';
-// DeepSeek đã khai tử "deepseek-chat" → model lấy từ env DEEPSEEK_MODEL, mặc định deepseek-flash.
+// /models của DeepSeek nay chỉ liệt kê deepseek-flash và deepseek-v4-pro ('deepseek-chat'
+// vẫn gọi được nhưng không còn được liệt kê). Đọc từ env để đổi model mà không phải deploy lại.
 const DEFAULT_MODEL = 'deepseek-flash';
+// Không có timeout thì một lần DeepSeek treo (đã gặp: chỉ gửi ': keep-alive' hàng phút
+// mà không sinh token) sẽ giữ request sống vô hạn, người dùng chỉ thấy HTTP 500 trống không.
+const DEFAULT_TIMEOUT_MS = 30_000;
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const PROMPT_VERSION = 'v3-aggressive';
 const VI_DIACRITICS = /[ăâêôơưđàáạảãằắặẳẵầấậẩẫèéẹẻẽềếệểễìíịỉĩòóọỏõồốộổỗờớợởỡùúụủũừứựửữỳýỵỷỹ]/i;
@@ -48,7 +52,7 @@ export class AiService {
     const cached = this.getCached(key);
     if (cached) return { data: { translated: { ...texts, ...cached } } };
 
-    const response = await fetch(DEEPSEEK_API_URL, {
+    const response = await this.callDeepSeek(DEEPSEEK_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -91,10 +95,35 @@ export class AiService {
     return { data: { translated: { ...texts, ...translated } } };
   }
 
+  /**
+   * fetch kèm hạn chờ. DeepSeek có lúc nhận request rồi chỉ gửi `: keep-alive`
+   * mà không sinh token nào — không chặn thì request treo vô hạn.
+   * Quá hạn → 503 kèm thông báo đọc được, để FE giữ nguyên tiếng Việt và báo
+   * người dùng thử lại, thay vì hiện HTTP 500 trống không.
+   */
+  private async callDeepSeek(url: string, init: RequestInit) {
+    const timeoutMs = Number(this.config.get<string>('DEEPSEEK_TIMEOUT_MS')) || DEFAULT_TIMEOUT_MS;
+    try {
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (error) {
+      const isTimeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+      if (isTimeout) {
+        throw new ServiceUnavailableException({
+          error: `Dich vu dich dang ban, khong phan hoi trong ${Math.max(1, Math.round(timeoutMs / 1000))}s. Vui long thu lai sau.`,
+          code: 'TRANSLATION_TIMEOUT',
+        });
+      }
+      throw new BadGatewayException({
+        error: 'Khong ket noi duoc toi dich vu dich',
+        details: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async getDeepSeekBalance() {
     const apiKey = this.config.get<string>('DEEPSEEK_API_KEY');
     if (!apiKey) throw new InternalServerErrorException('DEEPSEEK_API_KEY chua duoc cau hinh');
-    const response = await fetch(DEEPSEEK_BALANCE_URL, {
+    const response = await this.callDeepSeek(DEEPSEEK_BALANCE_URL, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     if (!response.ok) throw new BadGatewayException({ error: `DeepSeek API loi: ${response.status}`, details: await response.text() });

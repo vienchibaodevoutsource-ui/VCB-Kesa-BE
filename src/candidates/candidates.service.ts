@@ -88,8 +88,12 @@ const DRAFT_PLACEHOLDER_NAME = '(Dang nhap)';
 
 // Candidate writes embed base64 images (payload up to ~25MB), so the candidate
 // create/update + form-snapshot upsert can exceed Prisma's default 5s interactive
-// transaction limit. Give the write transaction more room to finish.
-const CANDIDATE_TX_OPTIONS = { maxWait: 15_000, timeout: 30_000 } as const;
+// transaction limit. Ảnh đã được đẩy lên Cloudinary TRƯỚC khi mở transaction
+// (sanitizeWriteImages), nên trong transaction chỉ còn 2 câu ghi — 15s là rộng rãi.
+// Không nới thêm: transaction giữ connection suốt thời gian đó, mà pool chỉ vài chỗ,
+// nên timeout dài biến một hồ sơ lỗi thành nghẽn cả app ("Timed out fetching a new
+// connection from the connection pool").
+const CANDIDATE_TX_OPTIONS = { maxWait: 5_000, timeout: 15_000 } as const;
 
 export interface CandidateFilterOptions {
   educations: string[];
@@ -136,15 +140,36 @@ export class CandidatesService {
     const sortBy = String(query.sortBy ?? 'newest');
     const where = await this.buildWhere(query);
     const orderBy = this.buildOrderBy(sortBy);
-    const total = await this.prisma.candidate.count({ where });
-    const { page: safePage } = clampPage(page, total, pageSize);
-    const skip = (safePage - 1) * pageSize;
-
     const includeStats = query.stats !== '0';
-    const [data, stats] = await Promise.all([
-      this.prisma.candidate.findMany({ where, orderBy, skip, take: pageSize, select: candidateListSelect }),
+
+    // count chạy SONG SONG với findMany thay vì chặn trước nó: mỗi lượt đi-về qua pooler
+    // tốn vài trăm ms nên bớt được một lượt là bớt đáng kể thời gian phản hồi.
+    // Đổi lại phải đoán trang trước khi biết total; nếu trang vượt quá thì lấy lại đúng
+    // trang cuối — trường hợp hiếm nên không ảnh hưởng đường đi thường gặp.
+    const page_ = Math.max(1, page);
+    const [total, firstPass, stats] = await Promise.all([
+      this.prisma.candidate.count({ where }),
+      this.prisma.candidate.findMany({
+        where,
+        orderBy,
+        skip: (page_ - 1) * pageSize,
+        take: pageSize,
+        select: candidateListSelect,
+      }),
       includeStats ? this.getStats() : Promise.resolve(null),
     ]);
+
+    const { page: safePage } = clampPage(page_, total, pageSize);
+    const data =
+      safePage === page_
+        ? firstPass
+        : await this.prisma.candidate.findMany({
+            where,
+            orderBy,
+            skip: (safePage - 1) * pageSize,
+            take: pageSize,
+            select: candidateListSelect,
+          });
 
     const compactMap = await this.fetchCompactListFormData(data.map((c) => c.id));
 
@@ -185,14 +210,21 @@ export class CandidatesService {
                "data"->>'beanCount'   AS "beanCount",
                "data"->>'lensCheck'   AS "lensCheck",
                "data"->>'shiftChoice' AS "shiftChoice"
-        FROM "kesa"."CandidateFormSnapshot"
+        FROM ${this.prisma.table('CandidateFormSnapshot')}
         WHERE "candidateId" IN (${Prisma.join(ids)})
       `);
       for (const row of snapRows) {
         if (row.id) result.set(row.id, buildCompact(row));
       }
-    } catch {
-      // Nếu truy vấn trích JSON lỗi, bỏ qua 4 field phụ — danh sách vẫn hiển thị bình thường.
+    } catch (error) {
+      // Danh sách vẫn hiển thị được (rơi xuống nhánh đọc formDataJson bên dưới), nhưng nhánh đó
+      // nặng hơn nhiều nên lỗi ở đây biểu hiện ra ngoài thành "tải rất chậm". Đừng nuốt im lặng.
+      console.error(
+        '[candidates] trích JSON từ snapshot lỗi, phải đọc formDataJson cho',
+        ids.length,
+        'hồ sơ:',
+        error instanceof Error ? error.message : error,
+      );
     }
 
     // Hồ sơ cũ chưa có snapshot: đọc formDataJson (text) chỉ cho những id còn thiếu.
@@ -209,7 +241,14 @@ export class CandidatesService {
   }
 
   async get(id: string) {
-    const candidate = await this.prisma.candidate.findUnique({ where: { id }, include: candidateInclude });
+    // relationLoadStrategy 'join': lấy cả 6 quan hệ trong MỘT câu SQL. Mặc định ('query')
+    // phát mỗi quan hệ một câu, mà mỗi lượt đi-về qua transaction pooler tốn 300-500ms
+    // nên riêng việc mở một hồ sơ đã ngốn vài giây.
+    const candidate = await this.prisma.candidate.findUnique({
+      where: { id },
+      include: candidateInclude,
+      relationLoadStrategy: 'join',
+    });
     if (!candidate) throw new NotFoundException('Not found');
     return this.withLegacyFormDataJson(candidate);
   }
@@ -737,7 +776,7 @@ export class CandidatesService {
   }
 
   private isCandidateListRequest(query: Record<string, unknown>) {
-    return ['page', 'pageSize', 'search', 'gender', 'education', 'brokerId', 'factoryId', 'fromDate', 'toDate', 'sortBy', 'status', 'draftSessionId', 'isVerified'].some(
+    return ['page', 'pageSize', 'search', 'gender', 'education', 'brokerId', 'factoryId', 'fromDate', 'toDate', 'sortBy', 'status', 'draftSessionId', 'isVerified', 'candidateCode'].some(
       (key) => query[key] !== undefined,
     );
   }
@@ -762,6 +801,11 @@ export class CandidatesService {
           { factory: { name: { contains: search, mode: 'insensitive' as const } } },
         ],
       });
+    }
+    // Lọc mã số hồ sơ: cho nhập nhiều mã cách nhau bởi dấu phẩy / khoảng trắng (khớp một phần, không phân biệt hoa-thường).
+    const codes = String(query.candidateCode ?? '').split(/[\s,;]+/).filter(Boolean);
+    if (codes.length) {
+      and.push({ OR: codes.map((code) => ({ candidateCode: { contains: code, mode: 'insensitive' as const } })) });
     }
     if (query.gender) and.push({ gender: String(query.gender) });
     if (query.education) and.push({ education: String(query.education) });
