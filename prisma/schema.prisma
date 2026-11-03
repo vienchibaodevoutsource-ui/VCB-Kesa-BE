@@ -143,6 +143,7 @@ model Candidate {
   familyMembers      FamilyMember[]
   interviews         InterviewCandidate[]
   formSnapshot       CandidateFormSnapshot?
+  partnerSyncs       PartnerSync[]
 
   @@index([status, draftSessionId])
   @@index([createdByUserId])
@@ -162,6 +163,28 @@ model CandidateFormSnapshot {
   candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
   @@index([formType])
+}
+
+// Lần đẩy hồ sơ sang dự án của đối tác (長青). Mỗi hồ sơ × đối tác 1 dòng.
+model PartnerSync {
+  id              String    @id @default(uuid())
+  candidateId     String
+  partner         String    // 'evergreen'
+  projectCode     String?   // mã dự án bên đối tác (Project_Settings cột A)
+  partnerWorkerId String?   // workerId đối tác trả về, vd VN-KESA-7F3K2
+  extras          Json      @default("{}") // giá trị nhập bổ sung cho các trường kesa không có
+  answers         Json      @default("{}") // câu trả lời phỏng vấn người dùng nhập, theo questionId của 長青
+  questionSnapshot Json?    // bộ câu hỏi lúc đẩy thành công gần nhất → so với bộ hiện tại để báo câu mới/đã sửa
+  status          String    // SENT | FAILED
+  lastError       String?
+  lastSentAt      DateTime?
+  lastSentVersion DateTime? // Candidate.updatedAt lúc đẩy thành công → biết hồ sơ đã sửa sau lần đẩy
+  sentById        String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  candidate       Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([candidateId, partner])
 }
 
 model FamilyMember {
