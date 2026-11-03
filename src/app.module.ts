@@ -8,6 +8,7 @@ import { CompaniesModule } from './companies/companies.module';
 import { CompatibilityModule } from './compatibility/compatibility.module';
 import { ExportsModule } from './exports/exports.module';
 import { FormsModule } from './forms/forms.module';
+import { PartnerSyncModule } from './partner-sync/partner-sync.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { RegistrationsModule } from './registrations/registrations.module';
 import { TeamCodesModule } from './team-codes/team-codes.module';
@@ -30,6 +31,7 @@ import { UsersModule } from './users/users.module';
     ExportsModule,
     RegistrationsModule,
     CompatibilityModule,
+    PartnerSyncModule,
   ],
 })
 export class AppModule {}
