@@ -1,9 +1,17 @@
-import { BadGatewayException, BadRequestException, Injectable, InternalServerErrorException } from '@nestjs/common';
+import {
+  BadGatewayException,
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_BALANCE_URL = 'https://api.deepseek.com/user/balance';
+// DeepSeek đã khai tử "deepseek-chat" → model lấy từ env DEEPSEEK_MODEL, mặc định deepseek-flash.
+const DEFAULT_MODEL = 'deepseek-flash';
 const CACHE_TTL_MS = 60 * 60 * 1000;
 const PROMPT_VERSION = 'v3-aggressive';
 const VI_DIACRITICS = /[ăâêôơưđàáạảãằắặẳẵầấậẩẫèéẹẻẽềếệểễìíịỉĩòóọỏõồốộổỗờớợởỡùúụủũừứựửữỳýỵỷỹ]/i;
@@ -44,7 +52,7 @@ export class AiService {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: this.config.get<string>('DEEPSEEK_MODEL')?.trim() || DEFAULT_MODEL,
         messages: [
           {
             role: 'system',
@@ -60,7 +68,12 @@ export class AiService {
     });
 
     if (!response.ok) {
-      throw new BadGatewayException({ error: 'DeepSeek API error', details: await response.text() });
+      const details = await response.text();
+      // 402 = tài khoản DeepSeek hết số dư → báo rõ để admin nạp tiền, không phải lỗi code.
+      if (response.status === 402) {
+        throw new ServiceUnavailableException({ message: 'Tài khoản DeepSeek đã hết số dư, cần nạp thêm để dịch tự động', details });
+      }
+      throw new BadGatewayException({ message: `DeepSeek API lỗi ${response.status}`, details });
     }
 
     const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
