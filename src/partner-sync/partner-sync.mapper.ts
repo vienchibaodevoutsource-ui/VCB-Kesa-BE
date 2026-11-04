@@ -1,23 +1,9 @@
-import { Company, FamilyMember, Prisma } from '@prisma/client';
+import { FamilyMember, Prisma } from '@prisma/client';
 import { normalizeSearch } from '../common/utils/normalize';
 
 export type SyncCandidate = Prisma.CandidateGetPayload<{
   include: { familyMembers: true; broker: true; factory: true; formSnapshot: true };
 }>;
-
-// Các cột Candidate gửi nguyên trạng sang đối tác (bỏ cột nội bộ: draftSessionId, nameSearch, formDataJson…).
-const RAW_FIELDS = [
-  'id', 'candidateCode', 'teamCode', 'status', 'isVerified', 'verifiedByName', 'verifiedAt',
-  'vietnameseName', 'chineseName', 'gender', 'dateOfBirth', 'age', 'height', 'weight', 'education',
-  'maritalStatus', 'passport', 'criminalRecord', 'healthCheck', 'address', 'religion', 'visionLeft',
-  'visionRight', 'handedness', 'smoking', 'drinking', 'colorBlindness', 'tattoos', 'languages',
-  'workExperience', 'domesticExperience', 'overseasExperience', 'note', 'cccd', 'phone', 'relativePhone',
-  'avatarUrl', 'lineImageUrl', 'limbImages', 'scarImages', 'tattooImages', 'canStandLong',
-  'canWorkOvertime', 'canWorkRotation', 'glassesDegree', 'hadSeriousIllness', 'illnessDescription',
-  'hadSurgery', 'surgeryDescription', 'hasAstigmatism', 'hasScars', 'scarDescription', 'hasTattoo',
-  'isColorBlind', 'isHealthy', 'healthIssueDesc', 'limbsIntact', 'maxLiftKg', 'needsGlasses', 'sweaty',
-  'createdAt', 'updatedAt',
-] as const;
 
 const GENDER: Record<string, string> = { Nam: '男', 'Nữ': '女', male: '男', female: '女' };
 const MARITAL: Record<string, string> = {
@@ -37,18 +23,12 @@ const RELIGION: Record<string, string> = {
 const FATHER = new Set(['Bố', 'Cha', '父親']);
 const MOTHER = new Set(['Mẹ', '母親']);
 
-// Payload gửi đối tác gồm 2 phần:
-// - raw: dữ liệu gốc của kesa (đầy đủ, để đối tác tự xử lý nếu cần)
-// - worker: đã quy đổi sang tên trường + giá trị của form hồ sơ 長青 (englishName, gender=男/女, marital=未婚…)
-export function buildPartnerPayload(c: SyncCandidate) {
-  const raw: Record<string, unknown> = {};
-  for (const key of RAW_FIELDS) raw[key] = c[key];
-  raw.broker = companyInfo(c.broker);
-  raw.factory = companyInfo(c.factory);
-  raw.familyMembers = c.familyMembers.map(({ name, relationship, age, occupation }) => ({ name, relationship, age, occupation }));
-  raw.formType = c.formSnapshot?.formType ?? null;
-  raw.formData = stripDataUris(c.formSnapshot?.data ?? null);
+// 長青 chỉ tải ảnh từ Cloudinary (link khác cần họ thêm vào whitelist); tải lỗi thì cả lần đẩy lỗi → bỏ link khác.
+const PHOTO_URL = /^https:\/\/res\.cloudinary\.com\//;
 
+// worker: đã quy đổi sang tên trường + giá trị của form hồ sơ 長青 (englishName, gender=男/女, marital=未婚…).
+// Không gửi dữ liệu gốc của kesa: 長青 không đọc cũng không lưu.
+export function buildPartnerPayload(c: SyncCandidate) {
   const father = findMember(c.familyMembers, FATHER);
   const mother = findMember(c.familyMembers, MOTHER);
   const form = formFields(c.formSnapshot?.data);
@@ -93,11 +73,11 @@ export function buildPartnerPayload(c: SyncCandidate) {
     otherLanguage: form.langTaiwanese === true ? '台語 略懂' : '',
     education: education(c.education, text(form.eduMajor)),
     docStatus: docStatus(c),
-    headshotUrl: c.avatarUrl ?? '',
-    fullbodyUrl: texts(form.fullBodyImages).find((u) => /^https?:\/\//.test(u)) ?? '',
+    headshotUrl: PHOTO_URL.test(c.avatarUrl ?? '') ? c.avatarUrl : '',
+    fullbodyUrl: texts(form.fullBodyImages).find((u) => PHOTO_URL.test(u)) ?? '',
   };
 
-  return { worker, raw };
+  return { worker };
 }
 
 type FormFields = Record<string, unknown>;
@@ -243,10 +223,6 @@ function joinText(parts: string[]) {
   return parts.filter(Boolean).join('；');
 }
 
-function companyInfo(company: Company | null) {
-  return company ? { id: company.id, slug: company.slug, name: company.name, chineseName: company.chineseName } : null;
-}
-
 function findMember(members: FamilyMember[], relationships: Set<string>) {
   return members.find((m) => relationships.has(m.relationship.trim()));
 }
@@ -290,14 +266,4 @@ function yesNoZh(value: unknown) {
 // 長青 dùng dấu phẩy toàn độ rộng: 有，<chi tiết>
 function withDetail(detail: string | null) {
   return detail?.trim() ? `有，${detail.trim()}` : '有';
-}
-
-// Snapshot đôi khi còn sót ảnh base64 (khi upload Cloudinary lỗi) → bỏ đi cho payload nhẹ.
-function stripDataUris(value: Prisma.JsonValue | null): Prisma.JsonValue | null {
-  if (typeof value === 'string') return value.startsWith('data:') ? null : value;
-  if (Array.isArray(value)) return value.map(stripDataUris);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, stripDataUris(v ?? null)]));
-  }
-  return value;
 }
