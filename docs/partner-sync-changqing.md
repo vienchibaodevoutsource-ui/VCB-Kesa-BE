@@ -26,6 +26,20 @@ POST /exec   { "action": "export_workers", "accessCode": "<KESA 存取碼>", "in
 
 `birthDate` 為 `yyyy-mm-dd`。`worker.workerId` 只能帶這裡查到的編號；帶其他仲介或不存在的編號，推送會失敗。
 
+```
+POST /exec   { "action": "list_questions", "accessCode": "<KESA 存取碼>", "projectCode": "<專案代碼>" }
+→ { "success": true, "projectCode", "setId", "setName",
+    "questions": [{ "questionId", "sortOrder", "section", "type", "labelZh",
+                    "labels": { "en", "id", "vn", "th" }, "options", "updatedAt" }] }
+```
+
+回傳該專案目前套用的題組中**啟用**的題目，依 `sortOrder` 排序。專案不屬於 KESA 時回傳錯誤。
+
+- `type`：`yesno`（回答 `是` / `否`）、`select`（從 `options` 擇一）、`text`、`textarea`、`number`。
+- `options`：字串陣列（只有 `select` 有值）。
+- `updatedAt`：題目最後修改時間（ISO 8601；舊題目可能為空字串）。
+- 長青 修改題組後立即生效（直接改試算表的話最多約 10 分鐘）。建議 KESA 在使用者開啟推送畫面、選好專案時呼叫一次。
+
 ## 1. 請求格式
 
 ```
@@ -51,8 +65,7 @@ Content-Type: application/json
   "version": "2026-11-02T03:00:00.000Z",
   "accessCode": "<KESA 在 長青 系統的存取碼>",
   "application": { "projectCode": "20261104_永勝光學新工50人", "introducer": "..." },
-  "worker": { ... 已轉換為 長青 表單欄位，見第 2 節 ... },
-  "raw":    { ... KESA 原始資料（越南文），見第 3 節 ... }
+  "worker": { ... 已轉換為 長青 表單欄位，見第 2 節 ... }
 }
 ```
 
@@ -94,8 +107,8 @@ Content-Type: application/json
 | `smoke` / `drink` | 抽菸 / 喝酒 | `有` / `無` |
 | `history` | 病史 | 越南文說明；有病史但無說明時為 `有`；無則為空 |
 | `marital` | 婚姻狀況 | `未婚` / `已婚` / `離婚` / `喪偶` |
-| `fatherName` / `fatherAge` / `fatherJob` | 父親 | 職業為越南文 |
-| `motherName` / `motherAge` / `motherJob` | 母親 | 職業為越南文 |
+| `fatherName` / `fatherAge` / `fatherJob` | 父親 | 職業為越南文（中文見 `fatherJobZh`）；空白的子欄位保留 長青 原值 |
+| `motherName` / `motherAge` / `motherJob` | 母親 | 同上 |
 | `fatherAlive` / `motherAlive` | 父親 / 母親 存歿 | `存` / `歿`；未填則不帶此欄 |
 | `birthPlace` | 出生地 | 使用者補填；未填則不帶此欄 |
 | `diet` | 飲食習慣 | `葷` / `葷(不吃豬)` / `素`；使用者補填 |
@@ -108,19 +121,55 @@ Content-Type: application/json
 | `specialty` | 特殊專長 | 越南文，多項以 `；` 分隔 |
 | `chineseLevel` | 中文能力 | `略懂` / `完全不會` |
 | `otherLanguage` | 其他語言 | 例如 `台語 略懂` |
+| `experience` | 工作經歷 | 陣列，格式同 `experienceJson`，見下方範例。長青 已有的筆數較多時保留 長青 的 |
 | `education` | 學歷 | 陣列，格式同 `educationJson`：`[{"degree":"高中","start":"","end":"","major":"","majorZh":"","status":"畢"}]`；KESA 無起迄年。長青 已有的筆數較多時保留 長青 的 |
 | `docStatus` | 護照 / 良民證 / 體檢狀態 | 格式同 `docStatusJson`：`{"passport":"辦理中","police":"無","medical":"有"}`；不確定的項目不帶 key |
 | `headshotUrl` | 大頭照 | 圖片公開網址（Cloudinary），非 base64。限 `https://res.cloudinary.com`（其他網域需先通知 長青 加入白名單）、`image/*`、單張 10MB 以內、不跟隨轉址。網址與上次推送相同時不會重新下載。下載失敗整筆推送失敗 |
 | `fullbodyUrl` | 全身照 | 同上 |
-| `interview` | 面談 | 物件，key 為 長青 題目文字（同 Excel 範本 `面談_` 後面的文字），值為越南文回答；是非題為 `是` / `否`。無回答的題目不帶 key。`是否抽水菸`、`是否有無塵衣經驗`、`之前工作是否辛苦`、`親戚朋友在台灣做什麼` 由使用者補填 |
+| `interview` | 面談 | 物件，key 為 `list_questions` 回傳的 `questionId`（建議，題目文字修改後仍有效）或中文題目 `labelZh`，值為越南文回答字串，或 `{ "original", "zh" }`（附中文，見下方「中文翻譯」）；是非題為 `是` / `否`。無回答的題目不帶 key。`是否抽水菸`、`是否有無塵衣經驗`、`之前工作是否辛苦`、`親戚朋友在台灣做什麼` 由使用者補填 |
 
 `religion`、`visionLeft` / `visionRight`、`chineseLevel` 預設由 KESA 表單轉換，使用者可在推送時改寫成 長青 的格式。
 
-`docStatus` 只合併有帶的 key；`interview` 的 key 必須與該專案題組的中文題目完全相同，對不上的題目會被略過。
+`docStatus` 只合併有帶的 key；`interview` 的 key 必須是該專案題組的 `questionId` 或與中文題目完全相同，對不上的題目會被略過。
 
-## 3. `raw`：KESA 原始資料
+`experience` 範例（依時間先後；KESA 沒有的欄位給空字串或省略）：
 
-包含 KESA 履歷的完整欄位（越南文原值）。**長青 目前不讀取也不儲存 `raw`**（含大量個資且沒有固定格式）；需要其中的資料（例如 `workExperience`）時，請另外提供轉換成 長青 `experienceJson` 格式的 `worker` 欄位。目前內容例如：
+```json
+[
+  { "country": "越南", "company": "Công ty TNHH ABC", "period": "2019-2022", "years": "3",
+    "content": "May mặc, kiểm hàng", "salary": "7.000.000 VND", "reason": "Hết hợp đồng" },
+  { "country": "台灣", "company": "...", "period": "2016-2019", "years": "3",
+    "content": "...", "salary": "", "reason": "" }
+]
+```
+
+| 欄位 | 說明 |
+|---|---|
+| `country` | 工作國別：國家代碼 `VN` / `TW` / `JP` / `KR` / `MY` / `SG` / `ID` / `TH` / `PH` / `AE` / `SA` / `KW`，或中文國名；其他國家請寫中文國名。**空白 = 勞工國籍（越南）** |
+| `company` / `companyZh` | 公司名稱（原文 / 中文） |
+| `period` | 期間，例如 `2019-2022` 或 `2019/03-2022/05` |
+| `years` | 總年數，數字或文字皆可 |
+| `content` / `contentZh` | 工作內容（越南文 / 中文） |
+| `salary` | 薪資（含幣別） |
+| `reason` / `reasonZh` | 離職原因（越南文 / 中文） |
+
+### 中文翻譯
+
+KESA 可以一併提供中文翻譯，長青 會直接使用，不需要兩邊各翻一次。規則：**有帶中文 = 以 KESA 為準；中文空白 = 原文沒改時保留 長青 原本的中文，原文改了就清空（舊翻譯已不適用）**。
+
+| 原文欄位 | 中文欄位 |
+|---|---|
+| `history` / `rank` / `children` / `specialty` | `historyZh` / `rankZh` / `childrenZh` / `specialtyZh` |
+| `fatherJob` / `motherJob` | `fatherJobZh` / `motherJobZh` |
+| `experience[].company` / `content` / `reason` | `experience[].companyZh` / `contentZh` / `reasonZh` |
+| `education[].major` | `education[].majorZh` |
+| `interview` 的回答 | 值改為物件 `{ "original": "<越南文>", "zh": "<中文>" }`；只有原文時仍可直接給字串 |
+
+學經歷的「同一筆」以陣列順序比對。
+
+## 3. `raw`：KESA 原始資料（不需傳送）
+
+包含 KESA 履歷的完整欄位（越南文原值）。**長青 不讀取也不儲存 `raw`**（含大量個資且沒有固定格式），KESA 可以不再傳送；工作經歷請改用 `worker.experience`。以下為原本的內容，僅供參考：
 
 - `education`、`workExperience`、`domesticExperience`、`overseasExperience`
 - `passport`、`criminalRecord`、`healthCheck`、`cccd`（越南身分證號）

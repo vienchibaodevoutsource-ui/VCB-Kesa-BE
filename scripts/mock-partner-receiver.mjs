@@ -2,7 +2,7 @@
 // Chạy:  PARTNER_SYNC_SECRET=<giống .env> node scripts/mock-partner-receiver.mjs
 // Rồi đặt PARTNER_SYNC_URL=http://localhost:4100 trong .env của BE và khởi động lại BE.
 // Không ghi gì vào sheet thật: chỉ kiểm chữ ký, in tóm tắt payload, trả workerId giả.
-// API tra cứu (list_projects, export_workers) trả 1 dự án giả và các worker giả đã đẩy.
+// API tra cứu (list_projects, list_questions, export_workers) trả 1 dự án, 4 câu hỏi giả và các worker giả đã đẩy.
 import { createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
 
@@ -29,6 +29,20 @@ createServer((req, res) => {
       if (parsed.action === 'list_projects') {
         return reply({ success: true, projects: [{ code: 'MOCK_TEST', name: 'Dự án giả', label: 'MOCK_TEST Dự án giả', status: '啟用' }] });
       }
+      if (parsed.action === 'list_questions') {
+        return reply({
+          success: true,
+          projectCode: parsed.projectCode,
+          setId: 'default',
+          setName: 'Bộ câu hỏi giả',
+          questions: [
+            { questionId: 'spouseLocation', sortOrder: 1, section: '家庭', type: 'text', labelZh: '配偶在哪裡', labels: { vn: 'Vợ/chồng ở đâu' }, options: [], updatedAt: '' },
+            { questionId: 'overtimeAccepted', sortOrder: 2, section: '工作', type: 'yesno', labelZh: '可以加班嗎', labels: { vn: 'Làm thêm giờ được không' }, options: [], updatedAt: '' },
+            { questionId: 'shiftPreference', sortOrder: 3, section: '工作', type: 'select', labelZh: '班別', labels: { vn: 'Ca làm' }, options: ['日班', '夜班', '皆可'], updatedAt: '' },
+            { questionId: 'selfIntro', sortOrder: 4, section: '其他', type: 'textarea', labelZh: '自我介紹', labels: { vn: 'Giới thiệu bản thân' }, options: [], updatedAt: '' },
+          ],
+        });
+      }
       if (parsed.action === 'export_workers') {
         return reply({ success: true, workers: [...workers.values()] });
       }
@@ -49,6 +63,7 @@ createServer((req, res) => {
       console.log('  tên / ngày sinh:', worker.englishName, '/', worker.birthDate);
       console.log('  bổ sung      :', ['birthPlace', 'diet', 'religion', 'englishLevel', 'passportNo', 'passportExp'].map((k) => `${k}=${worker[k] ?? ''}`).join(', '));
       console.log('  phỏng vấn    :', Object.keys(worker.interview ?? {}).length, 'câu có trả lời');
+      console.log('  kinh nghiệm  :', (worker.experience ?? []).length, 'dòng |', 'có *Zh:', Object.keys(worker).filter((k) => k.endsWith('Zh') && worker[k]).join(', ') || '—');
       return reply({ success: true, workerId });
     } catch (err) {
       return reply({ success: false, error: String(err?.message || err) });
