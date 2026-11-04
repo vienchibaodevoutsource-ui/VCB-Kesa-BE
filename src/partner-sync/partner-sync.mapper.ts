@@ -20,6 +20,27 @@ const RELIGION: Record<string, string> = {
   'Hồi giáo': '伊斯蘭教',
   'Khác': '其他',
 };
+const VI_DIACRITICS = /[ăâêôơưđàáạảãằắặẳẵầấậẩẫèéẹẻẽềếệểễìíịỉĩòóọỏõồốộổỗờớợởỡùúụủũừứựửữỳýỵỷỹ]/i;
+// 2019-2022, 2019/04 - 2019/07, 2018年-2020年, 2023-nay … (nhóm 1: năm bắt đầu, nhóm 2: năm kết thúc hoặc "đến nay")
+const PERIOD = /(\d{4})年?(?:[./]\d{1,2}月?)?\s*[-–~]\s*(\d{4}|nay|hiện tại|hiện nay|現在|至今)年?(?:[./]\d{1,2}月?)?/i;
+const YEAR = /(\d{4})年?(?:[./]\d{1,2}月?)?/;
+const NOW = /^(nay|hiện tại|hiện nay|現在|至今)$/i;
+const NOW_GLOBAL = /hiện tại|hiện nay|nay|現在/gi;
+// Mã nước theo 長青 (VN / TW / JP / KR / MY / SG / ID / TH / PH / AE / SA / KW).
+// Chặn chữ cái liền kề để "Hàn" không khớp trong "Hàn Quốc" lẫn tên riêng khác; "Thái" đứng riêng dễ là tỉnh Thái Bình nên bỏ.
+const COUNTRIES: Array<[RegExp, string]> = [
+  [/台灣|臺灣|đài loan|(?<!\p{L})đài(?!\p{L})/iu, 'TW'],
+  [/日本|nhật bản|(?<!\p{L})nhật(?!\p{L})/iu, 'JP'],
+  [/韓國|hàn quốc|(?<!\p{L})hàn(?!\p{L})/iu, 'KR'],
+  [/馬來西亞|馬來|malaysia|ma lai/iu, 'MY'],
+  [/新加坡|singapore/iu, 'SG'],
+  [/印尼|indonesia/iu, 'ID'],
+  [/泰國|thái lan/iu, 'TH'],
+  [/菲律賓|philippines/iu, 'PH'],
+  [/杜拜|阿聯|dubai|uae/iu, 'AE'],
+  [/沙烏地|saudi|ả rập/iu, 'SA'],
+  [/科威特|kuwait|cô oét/iu, 'KW'],
+];
 const FATHER = new Set(['Bố', 'Cha', '父親']);
 const MOTHER = new Set(['Mẹ', '母親']);
 
@@ -28,11 +49,17 @@ const PHOTO_URL = /^https:\/\/res\.cloudinary\.com\//;
 
 // worker: đã quy đổi sang tên trường + giá trị của form hồ sơ 長青 (englishName, gender=男/女, marital=未婚…).
 // Không gửi dữ liệu gốc của kesa: 長青 không đọc cũng không lưu.
+// Bản dịch tiếng Trung (*Zh): 長青 dùng thẳng bản của kesa, bỏ trống thì họ giữ bản cũ (hoặc xoá nếu bản gốc đã đổi).
+// kesa không lưu bản dịch → chỉ điền khi bản gốc vốn đã là tiếng Trung, không dịch máy để khỏi đè bản dịch tay của họ.
 export function buildPartnerPayload(c: SyncCandidate) {
   const father = findMember(c.familyMembers, FATHER);
   const mother = findMember(c.familyMembers, MOTHER);
   const form = formFields(c.formSnapshot?.data);
   const answers = interviewList(form);
+  const history = healthHistory(c);
+  const rank = siblingRank(form);
+  const kids = children(form, c.maritalStatus);
+  const specialty = joinText([text(form.specialSkills), text(form.licenses), ...texts(form.skills)]);
   const worker = {
     externalId: c.id,
     externalCode: c.candidateCode,
@@ -57,20 +84,27 @@ export function buildPartnerPayload(c: SyncCandidate) {
     tattoo: anyYes(c.hasTattoo, c.tattoos),
     smoke: yesNo(c.smoking),
     drink: yesNo(c.drinking),
-    history: healthHistory(c),
+    history,
+    historyZh: zhOnly(history),
     marital: MARITAL[c.maritalStatus ?? ''] ?? '',
     fatherName: father?.name ?? '',
     fatherAge: father?.age ?? '',
     fatherJob: father?.occupation ?? '',
+    fatherJobZh: zhOnly(father?.occupation),
     motherName: mother?.name ?? '',
     motherAge: mother?.age ?? '',
     motherJob: mother?.occupation ?? '',
-    rank: siblingRank(form),
-    children: children(form, c.maritalStatus),
+    motherJobZh: zhOnly(mother?.occupation),
+    rank,
+    rankZh: rank, // dạng 2/3, không cần dịch
+    children: kids,
+    childrenZh: kids, // đã ghép sẵn bằng tiếng Trung
     taiwanContact: taiwanContact(answers),
-    specialty: joinText([text(form.specialSkills), text(form.licenses), ...texts(form.skills)]),
+    specialty,
+    specialtyZh: zhOnly(specialty),
     chineseLevel: speaksMandarin(c, form) ? '略懂' : '完全不會',
     otherLanguage: form.langTaiwanese === true ? '台語 略懂' : '',
+    experience: [...experienceRows(c.domesticExperience, 'VN'), ...experienceRows(c.overseasExperience, null)].sort(byStartYear),
     education: education(c.education, text(form.eduMajor)),
     docStatus: docStatus(c),
     headshotUrl: PHOTO_URL.test(c.avatarUrl ?? '') ? c.avatarUrl : '',
@@ -191,7 +225,41 @@ function speaksMandarin(c: SyncCandidate, form: FormFields) {
 
 function education(level: string | null, major: string) {
   const degree = DEGREE[level?.trim() ?? ''];
-  return degree ? [{ degree, start: '', end: '', major, majorZh: '', status: '畢' }] : [];
+  return degree ? [{ degree, start: '', end: '', major, majorZh: zhOnly(major), status: '畢' }] : [];
+}
+
+// Kinh nghiệm kesa là chữ tự do, mỗi dòng 1 nơi, kiểu "2019-2022 may mặc, kiểm hàng" / "台灣 2018-2021 …".
+// Không tách được tên công ty với nội dung → để cả vào content (company/salary/reason kesa không có thì bỏ).
+// domestic: quốc gia VN; overseas: dò tên nước trong dòng, không nhận ra thì 海外 (để trống 長青 sẽ hiểu là Việt Nam).
+function experienceRows(value: string | null, country: string | null) {
+  return (value ?? '').split(/\n+/).flatMap((line) => {
+    let rest = line.trim();
+    const found = country ? null : COUNTRIES.find(([pattern]) => pattern.test(rest));
+    if (found) rest = rest.replace(found[0], ' ');
+    const period = rest.match(PERIOD) ?? rest.match(YEAR);
+    if (period) rest = rest.replace(period[0], ' ');
+    const content = rest.replace(/^[\s:：,，;；()（）\-–.]+|[\s:：,，;；()（）\-–.]+$/g, '');
+    if (!content && !period) return [];
+    const start = period ? Number(period[1]) : 0;
+    const end = period?.[2] ? (NOW.test(period[2]) ? new Date().getFullYear() : Number(period[2])) : 0;
+    return [{
+      country: country ?? found?.[1] ?? '海外',
+      period: period ? period[0].replace(NOW_GLOBAL, '至今').replace(/\s+/g, '') : '',
+      years: start && end > start ? String(end - start) : '',
+      content,
+      contentZh: zhOnly(content),
+    }];
+  });
+}
+
+function byStartYear(a: { period: string }, b: { period: string }) {
+  return (Number(a.period.slice(0, 4)) || 9999) - (Number(b.period.slice(0, 4)) || 9999);
+}
+
+// Chỉ coi là đã có bản tiếng Trung khi có chữ Hán và không còn dấu tiếng Việt.
+function zhOnly(value: string | null | undefined) {
+  const s = value?.trim() ?? '';
+  return /\p{Script=Han}/u.test(s) && !VI_DIACRITICS.test(s) ? s : '';
 }
 
 // Bỏ key khi không rõ trạng thái (長青: thiếu key = "chưa xác nhận").

@@ -26,7 +26,7 @@ type QuestionStatus = 'new' | 'changed' | null;
 // phải chọn gắn vào hồ sơ có sẵn (gửi worker.workerId) hoặc tạo mới, tránh 1 người 2 hồ sơ.
 // Sau khi đã gắn workerId thì không dò nữa.
 // Câu hỏi phỏng vấn đọc động theo bộ câu hỏi của dự án (長青 có thể thêm/sửa/tắt câu): kesa tự điền theo questionId,
-// câu còn lại người dùng trả lời; gửi sang 長青 trong worker.interview theo câu chữ tiếng Trung.
+// câu còn lại người dùng trả lời; gửi sang 長青 trong worker.interview theo questionId.
 // Lưu bộ câu hỏi lúc đẩy → lần sau so lại để báo hồ sơ cần bổ sung.
 // Cấu hình qua env (thiếu 1 trong 3 biến đầu = tắt):
 //   PARTNER_SYNC_URL          URL /exec của Apps Script (đẩy hồ sơ + API tra cứu dự án / worker)
@@ -88,9 +88,9 @@ export class PartnerSyncService {
     let questionChanges = 0;
     try {
       const selected = projectCode?.trim() || sync?.projectCode;
-      const set = selected ? await this.api.questionSet(selected) : null;
+      // Có projectCode = dialog vừa chọn dự án → lấy bộ câu hỏi mới nhất.
+      const set = selected ? await this.api.questionSet(selected, Boolean(projectCode?.trim())) : null;
       if (set) questions = questionViews(set, snapshot, auto, savedAnswers);
-      else if (selected) questionError = '長青 chưa cung cấp API câu hỏi phỏng vấn — tạm thời chưa gửi phần phỏng vấn';
       // Badge: bộ câu hỏi của dự án đã đẩy đổi so với lúc đẩy → hồ sơ cần mở ra bổ sung rồi đẩy lại.
       if (sync?.status === 'SENT' && sync.projectCode && snapshot) {
         const current = selected === sync.projectCode ? set : await this.api.questionSet(sync.projectCode);
@@ -166,8 +166,8 @@ export class PartnerSyncService {
       worker: {
         ...applyExtras(worker, extras),
         ...(workerId ? { workerId } : {}),
-        // 長青 khớp theo đúng câu chữ tiếng Trung của bộ câu hỏi; câu không khớp bị bỏ qua.
-        interview: Object.fromEntries(set?.questions.filter((q) => finalAnswers[q.questionId]).map((q) => [q.labelZh, finalAnswers[q.questionId]]) ?? []),
+        // Key theo questionId (長青 khuyên dùng): họ sửa câu chữ vẫn khớp; câu không có trong bộ câu hỏi bị bỏ qua.
+        interview: finalAnswers,
       },
     });
 
@@ -320,6 +320,7 @@ function applyExtras(worker: Worker, extras: Record<string, string>) {
 function questionViews(set: PartnerQuestionSet, snapshot: QuestionSnapshot | null, auto: Record<string, string>, saved: Record<string, string>) {
   return {
     setId: set.setId,
+    setName: set.setName,
     items: set.questions.map((q) => ({
       ...q,
       options: answerOptions(q),
