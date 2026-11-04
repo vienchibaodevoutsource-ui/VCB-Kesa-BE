@@ -14,7 +14,7 @@ if (!secret) {
 }
 
 const workerIds = new Map(); // externalId → workerId giả (đẩy lại thì giữ nguyên)
-const workers = new Map(); // workerId → { workerId, englishName, birthDate, phone } cho export_workers
+const workers = new Map(); // workerId → { workerId, englishName, birthDate, phone, projects } cho export_workers
 
 createServer((req, res) => {
   let body = '';
@@ -55,7 +55,7 @@ createServer((req, res) => {
       const workerId =
         worker.workerId || workerIds.get(worker.externalId) || `VN-KESA-MOCK${workerIds.size + 1}`;
       workerIds.set(worker.externalId, workerId);
-      workers.set(workerId, { workerId, englishName: worker.englishName, birthDate: worker.birthDate, phone: worker.phone });
+      workers.set(workerId, { workerId, englishName: worker.englishName, birthDate: worker.birthDate, phone: worker.phone, projects: [application?.projectCode].filter(Boolean) });
 
       console.log(`\n[${new Date().toLocaleTimeString()}] Nhận hồ sơ ${worker.externalCode ?? worker.externalId}`);
       console.log('  workerId     :', workerId, worker.workerId ? '(gắn hồ sơ có sẵn)' : '');
