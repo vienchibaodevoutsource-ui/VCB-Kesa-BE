@@ -4,12 +4,11 @@ import { Prisma, PartnerSync } from '@prisma/client';
 import { createHmac } from 'crypto';
 import { AuthUser } from '../common/types';
 import { PrismaService } from '../prisma/prisma.service';
-import { PartnerQuestion, PartnerQuestionSet, PartnerSheetClient, PartnerWorkerMatch } from './partner-sheet.client';
+import { PartnerApiClient, PartnerQuestion, PartnerQuestionSet, PartnerWorkerMatch, postExec } from './partner-api.client';
 import { EXTRA_FIELDS, ExtraField } from './partner-sync.fields';
 import { autoInterviewAnswers, buildPartnerPayload } from './partner-sync.mapper';
 
 const PARTNER = 'evergreen';
-const REQUEST_TIMEOUT_MS = 60_000;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const NUMBER = /^\d+(\.\d+)?$/;
 const YES_NO = ['是', '否'];
@@ -27,13 +26,13 @@ type QuestionStatus = 'new' | 'changed' | null;
 // phải chọn gắn vào hồ sơ có sẵn (gửi worker.workerId) hoặc tạo mới, tránh 1 người 2 hồ sơ.
 // Sau khi đã gắn workerId thì không dò nữa.
 // Câu hỏi phỏng vấn đọc động theo bộ câu hỏi của dự án (長青 có thể thêm/sửa/tắt câu): kesa tự điền theo questionId,
-// câu còn lại người dùng trả lời. Lưu bộ câu hỏi lúc đẩy → lần sau so lại để báo hồ sơ cần bổ sung.
-// Cấu hình qua env:
-//   PARTNER_SYNC_URL          URL /exec của Apps Script (bỏ trống = tắt)
+// câu còn lại người dùng trả lời; gửi sang 長青 trong worker.interview theo câu chữ tiếng Trung.
+// Lưu bộ câu hỏi lúc đẩy → lần sau so lại để báo hồ sơ cần bổ sung.
+// Cấu hình qua env (thiếu 1 trong 3 biến đầu = tắt):
+//   PARTNER_SYNC_URL          URL /exec của Apps Script (đẩy hồ sơ + API tra cứu dự án / worker)
 //   PARTNER_SYNC_SECRET       khoá chung để ký HMAC-SHA256, đối tác dùng để xác thực
+//   PARTNER_SYNC_ACCESS_CODE  mã truy cập kesa trên hệ thống đối tác (đại lý, không phải mã admin)
 //   PARTNER_SYNC_COMPANY_IDS  id hoặc slug công ty (môi giới/nhà máy) được phép đẩy, cách nhau bởi dấu phẩy
-//   PARTNER_SYNC_ACCESS_CODE  mã truy cập kesa trên hệ thống đối tác (gửi kèm payload để họ biết đại lý)
-//   PARTNER_SHEET_*           xem PartnerSheetClient (dự án, bộ câu hỏi, dò trùng)
 @Injectable()
 export class PartnerSyncService {
   private readonly logger = new Logger(PartnerSyncService.name);
@@ -44,7 +43,7 @@ export class PartnerSyncService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly sheet: PartnerSheetClient,
+    private readonly api: PartnerApiClient,
     config: ConfigService,
   ) {
     this.url = config.get<string>('PARTNER_SYNC_URL')?.trim() ?? '';
@@ -56,16 +55,18 @@ export class PartnerSyncService {
         .map((s) => s.trim())
         .filter(Boolean),
     );
-    if (this.url && !this.secret) this.logger.warn('PARTNER_SYNC_URL đã đặt nhưng thiếu PARTNER_SYNC_SECRET → tắt đẩy hồ sơ');
+    if (this.url && !(this.secret && this.accessCode)) {
+      this.logger.warn('PARTNER_SYNC_URL đã đặt nhưng thiếu PARTNER_SYNC_SECRET / PARTNER_SYNC_ACCESS_CODE → tắt đẩy hồ sơ');
+    }
   }
 
   isEnabled() {
-    return Boolean(this.url && this.secret);
+    return Boolean(this.url && this.secret && this.accessCode);
   }
 
   async listProjects() {
     try {
-      return await this.sheet.listActiveProjects();
+      return await this.api.listActiveProjects();
     } catch (err) {
       throw new BadGatewayException(errorMessage(err));
     }
@@ -87,22 +88,16 @@ export class PartnerSyncService {
     let questionChanges = 0;
     try {
       const selected = projectCode?.trim() || sync?.projectCode;
-      const set = selected ? await this.sheet.questionSet(selected) : null;
+      const set = selected ? await this.api.questionSet(selected) : null;
       if (set) questions = questionViews(set, snapshot, auto, savedAnswers);
+      else if (selected) questionError = '長青 chưa cung cấp API câu hỏi phỏng vấn — tạm thời chưa gửi phần phỏng vấn';
       // Badge: bộ câu hỏi của dự án đã đẩy đổi so với lúc đẩy → hồ sơ cần mở ra bổ sung rồi đẩy lại.
       if (sync?.status === 'SENT' && sync.projectCode && snapshot) {
-        const current = selected === sync.projectCode ? set : await this.sheet.questionSet(sync.projectCode);
+        const current = selected === sync.projectCode ? set : await this.api.questionSet(sync.projectCode);
         questionChanges = current ? current.questions.filter((q) => questionStatus(q, current.setId, snapshot)).length : 0;
       }
     } catch (err) {
       questionError = errorMessage(err);
-    }
-    let duplicates: DuplicateView[] = [];
-    let duplicateCheckError: string | null = null;
-    try {
-      duplicates = await this.findDuplicates(candidate, worker, sync?.partnerWorkerId);
-    } catch (err) {
-      duplicateCheckError = errorMessage(err);
     }
     return {
       // false → FE ẩn nút (chưa cấu hình, hoặc hồ sơ không thuộc 長青)
@@ -111,8 +106,6 @@ export class PartnerSyncService {
       sync: sync ? { ...this.syncView(sync, candidate.updatedAt), questionChanges } : null,
       questions,
       questionError,
-      duplicates,
-      duplicateCheckError,
       worker,
       fields: EXTRA_FIELDS.map((field) => ({
         ...field,
@@ -120,6 +113,17 @@ export class PartnerSyncService {
         saved: saved[field.key] ?? '',
       })),
     };
+  }
+
+  // Tách khỏi preview: export_workers của 長青 chậm (~25s) → chỉ dò khi mở dialog, không dò lúc tải trang để hiện badge.
+  async duplicates(candidateId: string) {
+    const candidate = await this.loadCandidate(candidateId);
+    const sync = await this.findSync(candidateId);
+    try {
+      return { duplicates: await this.findDuplicates(candidate, buildPartnerPayload(candidate).worker, sync?.partnerWorkerId), duplicateCheckError: null };
+    } catch (err) {
+      return { duplicates: [] as DuplicateView[], duplicateCheckError: errorMessage(err) };
+    }
   }
 
   async push(candidateId: string, body: Record<string, unknown>, user: AuthUser) {
@@ -130,16 +134,16 @@ export class PartnerSyncService {
 
     const projectCode = typeof body.projectCode === 'string' ? body.projectCode.trim() : '';
     if (!projectCode) throw new BadRequestException('Chưa chọn dự án');
-    if (this.sheet.isEnabled() && !(await this.listProjects()).some((p) => p.code === projectCode)) {
+    if (!(await this.listProjects()).some((p) => p.code === projectCode)) {
       throw new BadRequestException('Dự án không tồn tại hoặc không còn 啟用');
     }
 
-    const { worker, raw } = buildPartnerPayload(candidate);
+    const { worker } = buildPartnerPayload(candidate);
     const extras = cleanExtras(body.extras, worker, candidate);
     const workerId = await this.resolveWorkerId(candidate, worker, body.duplicateChoice);
     let set: PartnerQuestionSet | null = null;
     try {
-      set = await this.sheet.questionSet(projectCode);
+      set = await this.api.questionSet(projectCode);
     } catch (err) {
       throw new BadGatewayException(`Không đọc được bộ câu hỏi của 長青: ${errorMessage(err)}`);
     }
@@ -147,12 +151,14 @@ export class PartnerSyncService {
     const answers = set ? cleanAnswers(body.answers, set, auto) : {};
     const finalAnswers = set ? mergeAnswers(set, auto, answers) : {};
     const now = new Date().toISOString();
+    // Không gửi raw: 長青 không đọc cũng không lưu (nhiều dữ liệu cá nhân, không có format cố định).
+    // Ô trống = 長青 giữ nguyên giá trị cũ, kesa không xoá được trường bên họ.
     const payload = JSON.stringify({
       event: 'candidate.upserted',
       sentAt: now,
       // Đẩy thủ công: phần nhập bổ sung có thể đổi mà hồ sơ không đổi → version theo thời điểm đẩy, không theo updatedAt.
       version: now,
-      accessCode: this.accessCode || undefined,
+      accessCode: this.accessCode,
       application: {
         projectCode,
         introducer: extras.introducer ?? mappedValue(EXTRA_FIELDS[0], worker, candidate),
@@ -160,12 +166,9 @@ export class PartnerSyncService {
       worker: {
         ...applyExtras(worker, extras),
         ...(workerId ? { workerId } : {}),
-        // Giữ key theo câu chữ (tương thích "面談_<題目>"); 長青 nên dùng answers theo questionId.
+        // 長青 khớp theo đúng câu chữ tiếng Trung của bộ câu hỏi; câu không khớp bị bỏ qua.
         interview: Object.fromEntries(set?.questions.filter((q) => finalAnswers[q.questionId]).map((q) => [q.labelZh, finalAnswers[q.questionId]]) ?? []),
       },
-      questionSetId: set?.setId,
-      answers: finalAnswers,
-      raw,
     });
 
     const saved = {
@@ -175,7 +178,9 @@ export class PartnerSyncService {
       sentById: user.id,
     };
     try {
-      const response = (await this.post(payload)) as { workerId?: string };
+      const response = await this.post(payload);
+      // version không mới hơn lần đã lưu bên 長青 → họ không ghi gì; không coi là đã đẩy.
+      if (response.skipped === 'stale') throw new Error('長青 bỏ qua vì version không mới hơn lần đẩy trước, chưa ghi gì — hãy đẩy lại');
       const sync = await this.saveSync(candidateId, {
         ...saved,
         status: 'SENT',
@@ -220,7 +225,7 @@ export class PartnerSyncService {
   // Kèm thông tin hồ sơ kesa khác đã gắn vào workerId đó (kesa có hồ sơ trùng nhau).
   private async findDuplicates(candidate: LoadedCandidate, worker: Worker, linkedWorkerId: string | null | undefined) {
     if (linkedWorkerId) return [];
-    const matches = await this.sheet.findKesaWorkers(worker);
+    const matches = await this.api.findKesaWorkers(worker);
     if (!matches.length) return [];
     const links = await this.prisma.partnerSync.findMany({
       where: { partner: PARTNER, partnerWorkerId: { in: matches.map((m) => m.workerId) }, candidateId: { not: candidate.id } },
@@ -277,28 +282,9 @@ export class PartnerSyncService {
 
   // Apps Script không đọc được header của request → chữ ký nằm trong body, ký trên đúng chuỗi payload.
   // Đẩy thủ công nên không tự thử lại: lỗi trả về cho người dùng bấm lại.
-  private async post(payload: string) {
+  private post(payload: string) {
     const signature = createHmac('sha256', this.secret).update(payload, 'utf8').digest('hex');
-    // /exec của Apps Script trả 302 sang script.googleusercontent.com; fetch tự follow (đổi thành GET) để lấy kết quả.
-    const res = await fetch(this.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ payload, signature }),
-      redirect: 'follow',
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      // Lỗi runtime của Apps Script trả về trang HTML thay vì JSON.
-      throw new Error(`Phản hồi không phải JSON: ${text.slice(0, 300)}`);
-    }
-    const result = parsed as { success?: boolean; error?: string };
-    if (result.success === false) throw new Error(result.error || 'Đối tác trả về success=false');
-    return parsed;
+    return postExec<{ workerId?: string; skipped?: string }>(this.url, { payload, signature });
   }
 }
 

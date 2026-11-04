@@ -20,6 +20,11 @@ export class PartnerSyncController {
     return { data: await this.partnerSync.preview(id, projectCode) };
   }
 
+  @Get('candidates/:id/duplicates')
+  async duplicates(@Param('id') id: string) {
+    return { data: await this.partnerSync.duplicates(id) };
+  }
+
   @Post('candidates/:id/push')
   async push(@Param('id') id: string, @Body() body: Record<string, unknown>, @CurrentUser() user: AuthUser) {
     return { data: await this.partnerSync.push(id, body, user) };

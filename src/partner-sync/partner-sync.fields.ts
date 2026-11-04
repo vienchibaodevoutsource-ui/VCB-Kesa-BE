@@ -1,5 +1,5 @@
 // Các trường 長青 cần mà form kesa không có (hoặc khác định dạng) → người dùng nhập bổ sung trong dialog đẩy hồ sơ.
-// Câu hỏi phỏng vấn không nằm ở đây: đọc động theo bộ câu hỏi của dự án (PartnerSheetClient.questionSet).
+// Câu hỏi phỏng vấn không nằm ở đây: đọc động theo bộ câu hỏi của dự án (PartnerApiClient.questionSet).
 // target: nơi giá trị được ghép vào payload
 //   worker      → worker[key]
 //   application → application[key] (dòng Interview_Applications)
