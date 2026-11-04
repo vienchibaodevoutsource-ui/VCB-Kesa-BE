@@ -75,8 +75,7 @@ export class PartnerSyncService {
   // Dữ liệu cho dialog: trạng thái lần đẩy trước + từng trường bổ sung (giá trị map từ form và giá trị đã nhập lần trước)
   // + câu hỏi phỏng vấn của dự án đang chọn (mặc định dự án đã đẩy lần trước).
   async preview(candidateId: string, projectCode?: string) {
-    const candidate = await this.loadCandidate(candidateId);
-    const sync = await this.findSync(candidateId);
+    const [candidate, sync] = await Promise.all([this.loadCandidate(candidateId), this.findSync(candidateId)]);
     const { worker } = buildPartnerPayload(candidate);
     const saved = stringRecord(sync?.extras);
     const snapshot = questionSnapshot(sync?.questionSnapshot);
@@ -86,14 +85,18 @@ export class PartnerSyncService {
     let questions: ReturnType<typeof questionViews> | null = null;
     let questionError: string | null = null;
     let questionChanges = 0;
+    const picked = projectCode?.trim();
+    // Mở trang (chưa chọn dự án): tải trước dò trùng + dự án để lúc mở dialog khỏi chờ ~22s.
+    if (!picked && this.isEnabled() && !this.blockedReason(candidate)) this.api.warmUp();
     try {
-      const selected = projectCode?.trim() || sync?.projectCode;
-      // Có projectCode = dialog vừa chọn dự án → lấy bộ câu hỏi mới nhất.
-      const set = selected ? await this.api.questionSet(selected, Boolean(projectCode?.trim())) : null;
+      // Dialog vừa chọn dự án → lấy bộ câu hỏi mới nhất; lúc mở trang (badge) thì không chờ mạng.
+      const set = picked
+        ? await this.api.questionSet(picked, 'fresh')
+        : sync?.projectCode ? await this.api.questionSet(sync.projectCode, 'peek') : null;
       if (set) questions = questionViews(set, snapshot, auto, savedAnswers);
       // Badge: bộ câu hỏi của dự án đã đẩy đổi so với lúc đẩy → hồ sơ cần mở ra bổ sung rồi đẩy lại.
       if (sync?.status === 'SENT' && sync.projectCode && snapshot) {
-        const current = selected === sync.projectCode ? set : await this.api.questionSet(sync.projectCode);
+        const current = picked === sync.projectCode || !picked ? set : await this.api.questionSet(sync.projectCode, 'peek');
         questionChanges = current ? current.questions.filter((q) => questionStatus(q, current.setId, snapshot)).length : 0;
       }
     } catch (err) {
@@ -117,8 +120,7 @@ export class PartnerSyncService {
 
   // Tách khỏi preview: export_workers của 長青 chậm (~25s) → chỉ dò khi mở dialog, không dò lúc tải trang để hiện badge.
   async duplicates(candidateId: string) {
-    const candidate = await this.loadCandidate(candidateId);
-    const sync = await this.findSync(candidateId);
+    const [candidate, sync] = await Promise.all([this.loadCandidate(candidateId), this.findSync(candidateId)]);
     try {
       return { duplicates: await this.findDuplicates(candidate, buildPartnerPayload(candidate).worker, sync?.partnerWorkerId), duplicateCheckError: null };
     } catch (err) {
@@ -128,25 +130,24 @@ export class PartnerSyncService {
 
   async push(candidateId: string, body: Record<string, unknown>, user: AuthUser) {
     if (!this.isEnabled()) throw new BadRequestException('Chưa cấu hình đẩy hồ sơ sang 長青');
-    const candidate = await this.loadCandidate(candidateId);
-    const blocked = this.blockedReason(candidate);
-    if (blocked) throw new BadRequestException(blocked);
-
     const projectCode = typeof body.projectCode === 'string' ? body.projectCode.trim() : '';
     if (!projectCode) throw new BadRequestException('Chưa chọn dự án');
-    if (!(await this.listProjects()).some((p) => p.code === projectCode)) {
-      throw new BadRequestException('Dự án không tồn tại hoặc không còn 啟用');
-    }
+
+    // Các bước đọc không phụ thuộc nhau → chạy song song; dự án / câu hỏi thường đã nằm trong cache từ lúc mở dialog.
+    const [candidate, sync, projects, set] = await Promise.all([
+      this.loadCandidate(candidateId),
+      this.findSync(candidateId),
+      this.listProjects(),
+      this.api.questionSet(projectCode).catch((err: unknown) => new Error(errorMessage(err))),
+    ]);
+    const blocked = this.blockedReason(candidate);
+    if (blocked) throw new BadRequestException(blocked);
+    if (!projects.some((p) => p.code === projectCode)) throw new BadRequestException('Dự án không tồn tại hoặc không còn 啟用');
+    if (set instanceof Error) throw new BadGatewayException(`Không đọc được bộ câu hỏi của 長青: ${set.message}`);
 
     const { worker } = buildPartnerPayload(candidate);
     const extras = cleanExtras(body.extras, worker, candidate);
-    const workerId = await this.resolveWorkerId(candidate, worker, body.duplicateChoice);
-    let set: PartnerQuestionSet | null = null;
-    try {
-      set = await this.api.questionSet(projectCode);
-    } catch (err) {
-      throw new BadGatewayException(`Không đọc được bộ câu hỏi của 長青: ${errorMessage(err)}`);
-    }
+    const workerId = await this.resolveWorkerId(candidate, worker, body.duplicateChoice, sync);
     const auto = autoInterviewAnswers(candidate);
     const answers = set ? cleanAnswers(body.answers, set, auto) : {};
     const finalAnswers = set ? mergeAnswers(set, auto, answers) : {};
@@ -199,8 +200,7 @@ export class PartnerSyncService {
   }
 
   // Đã gắn từ lần đẩy trước → dùng luôn. Chưa gắn → dò lại (mới nhất) và bắt người dùng chọn nếu có trùng.
-  private async resolveWorkerId(candidate: LoadedCandidate, worker: Worker, choice: unknown): Promise<string | null> {
-    const sync = await this.findSync(candidate.id);
+  private async resolveWorkerId(candidate: LoadedCandidate, worker: Worker, choice: unknown, sync: PartnerSync | null): Promise<string | null> {
     if (sync?.partnerWorkerId) return sync.partnerWorkerId;
 
     let duplicates: DuplicateView[];
