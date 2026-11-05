@@ -82,6 +82,13 @@ model Candidate {
   verifiedById       String?
   verifiedByName     String?
   verifiedAt         DateTime?
+  // Chuyển hồ sơ sang công ty/nhà máy khác: hồ sơ mới là bản nhân bản của hồ sơ nguồn.
+  // applicantGroupId = id hồ sơ gốc của cả chuỗi chuyển; transferReason nằm ở hồ sơ MỚI.
+  sourceCandidateId  String?
+  source             Candidate?           @relation("CandidateTransfer", fields: [sourceCandidateId], references: [id], onDelete: SetNull)
+  transfers          Candidate[]          @relation("CandidateTransfer")
+  applicantGroupId   String?
+  transferReason     String?
   nameSearch         String?
   chineseName        String?
   vietnameseName     String
@@ -154,6 +161,8 @@ model Candidate {
   @@index([status, createdAt])
   @@index([createdAt])
   @@index([nameSearch])
+  @@index([applicantGroupId])
+  @@index([sourceCandidateId])
 }
 
 model CandidateFormSnapshot {

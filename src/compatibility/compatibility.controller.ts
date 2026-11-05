@@ -195,8 +195,11 @@ export class CompatibilityController {
     @Query('dob') dob?: string,
     @Query('hometown') hometown?: string,
     @Query('excludeId') excludeId?: string,
+    @Query('brokerId') brokerId?: string,
+    @Query('factoryId') factoryId?: string,
   ) {
-    return this.candidates.checkDuplicateProfile(name, dob, hometown, excludeId);
+    const scope = brokerId || factoryId ? { brokerId, factoryId } : undefined;
+    return this.candidates.checkDuplicateProfile(name, dob, hometown, excludeId, scope);
   }
 
   @Get('candidates/:id')
@@ -227,6 +230,18 @@ export class CompatibilityController {
   @UseGuards(AuthGuard)
   verifyCandidate(@Param('id') id: string, @Body() body: { verified?: boolean }, @CurrentUser() user: AuthUser) {
     return this.candidates.setVerified(id, body?.verified !== false, user);
+  }
+
+  @Post('candidates/:id/reapply')
+  @UseGuards(AuthGuard)
+  reapplyCandidate(@Param('id') id: string, @Body() body: Record<string, unknown>, @CurrentUser() user: AuthUser) {
+    return this.candidates.reapply(id, body, user);
+  }
+
+  @Get('candidates/:id/applications')
+  @UseGuards(AuthGuard)
+  candidateApplications(@Param('id') id: string) {
+    return this.candidates.listApplications(id);
   }
 
   @Delete('candidates/:id')
@@ -264,6 +279,8 @@ export class CompatibilityController {
   @Post('delete-image')
   @UseGuards(AuthGuard)
   async deleteImage(@Body() body: { url?: string }) {
+    // Ảnh dùng chung giữa các hồ sơ nhân bản (nộp nhà máy khác) → giữ file, chỉ hồ sơ hiện tại bỏ tham chiếu.
+    if (await this.candidates.isImageShared(body?.url)) return { deleted: false, skipped: true, shared: true };
     return this.uploads.removeByUrl(body?.url);
   }
 

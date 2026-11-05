@@ -39,8 +39,11 @@ export class CandidatesController {
     @Query('dob') dob?: string,
     @Query('hometown') hometown?: string,
     @Query('excludeId') excludeId?: string,
+    @Query('brokerId') brokerId?: string,
+    @Query('factoryId') factoryId?: string,
   ) {
-    return this.candidates.checkDuplicateProfile(name, dob, hometown, excludeId);
+    const scope = brokerId || factoryId ? { brokerId, factoryId } : undefined;
+    return this.candidates.checkDuplicateProfile(name, dob, hometown, excludeId, scope);
   }
 
   @Get(':id')
@@ -61,6 +64,16 @@ export class CandidatesController {
   @Patch(':id/verify')
   async verify(@Param('id') id: string, @Body() body: { verified?: boolean }, @CurrentUser() user: AuthUser) {
     return { data: await this.candidates.setVerified(id, body?.verified !== false, user) };
+  }
+
+  @Post(':id/reapply')
+  async reapply(@Param('id') id: string, @Body() body: Record<string, unknown>, @CurrentUser() user: AuthUser) {
+    return { data: await this.candidates.reapply(id, body, user) };
+  }
+
+  @Get(':id/applications')
+  async applications(@Param('id') id: string) {
+    return { data: await this.candidates.listApplications(id) };
   }
 
   @Post(':id/complete')

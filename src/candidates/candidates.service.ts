@@ -10,8 +10,30 @@ import { PrismaService } from '../prisma/prisma.service';
 import { UploadsService } from '../uploads/uploads.service';
 import { sanitizeImageValues } from '../common/utils/image-sanitizer';
 
+// Hồ sơ đã chuyển đi (bản mới đã Lưu) — để gắn nhãn "Đã chuyển → Nhà máy B".
+const transfersSelect = {
+  where: { status: 'COMPLETED' as const },
+  orderBy: { createdAt: 'desc' as const },
+  take: 1,
+  select: {
+    id: true,
+    candidateCode: true,
+    broker: { select: { name: true } },
+    factory: { select: { name: true } },
+  },
+};
+
 const candidateInclude = {
   familyMembers: true,
+  source: {
+    select: {
+      id: true,
+      candidateCode: true,
+      broker: { select: { name: true } },
+      factory: { select: { name: true } },
+    },
+  },
+  transfers: transfersSelect,
   broker: true,
   factory: true,
   createdBy: { select: { id: true, name: true, email: true, role: true, teamCode: true } },
@@ -50,6 +72,8 @@ const candidateListSelect = {
   verifiedById: true,
   verifiedByName: true,
   verifiedAt: true,
+  applicantGroupId: true,
+  transfers: transfersSelect,
   lineImageUrl: true,
   domesticExperience: true,
   overseasExperience: true,
@@ -85,6 +109,9 @@ const candidateAllSelect = {
 // Các khóa nhỏ cần trích từ JSON form (riêng biểu mẫu Vĩnh Thắng) để hiển thị ở bảng danh sách.
 const COMPACT_LIST_KEYS = ['mathScore', 'beanCount', 'lensCheck', 'shiftChoice'] as const;
 const DRAFT_PLACEHOLDER_NAME = '(Dang nhap)';
+const TRANSFER_REASON_MAX = 500;
+// Khóa trong snapshot JSON gắn với nhà máy/hồ sơ cũ — bỏ khi nhân bản sang nhà máy khác.
+const REAPPLY_STRIP_SNAPSHOT_KEYS = ['candidateCode', 'interviewResult', 'brokerId', 'factoryId', 'company', 'formType'] as const;
 
 // Candidate writes embed base64 images (payload up to ~25MB), so the candidate
 // create/update + form-snapshot upsert can exceed Prisma's default 5s interactive
@@ -94,6 +121,8 @@ const DRAFT_PLACEHOLDER_NAME = '(Dang nhap)';
 // nên timeout dài biến một hồ sơ lỗi thành nghẽn cả app ("Timed out fetching a new
 // connection from the connection pool").
 const CANDIDATE_TX_OPTIONS = { maxWait: 5_000, timeout: 15_000 } as const;
+
+type DupScope = { brokerId?: string | null; factoryId?: string | null };
 
 export interface CandidateFilterOptions {
   educations: string[];
@@ -259,7 +288,7 @@ export class CandidatesService {
     const brokerId = this.stringValue(data.brokerId);
     const factoryId = this.stringValue(data.factoryId);
     await this.validateBrokerFactory(brokerId, factoryId);
-    await this.assertNoTripleDuplicate(data);
+    await this.assertNoTripleDuplicate(data, undefined, { brokerId, factoryId });
     await this.validateRequestedTeam(teamCode);
     const resolvedTeamCode = (await this.resolveTeamForCode(teamCode, user)) || null;
     if (!resolvedTeamCode) throw new BadRequestException('Vui long chon ma to ho so (Team Code)');
@@ -380,7 +409,7 @@ export class CandidatesService {
     const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
     const formSnapshot = await this.sanitizeWriteImages(data, this.takeFormSnapshot(data));
     delete data.draftSessionId;
-    await this.assertNoTripleDuplicate(data, id);
+    await this.assertNoTripleDuplicate(data, id, this.dupScope(data, existing));
     await this.validateRequestedTeam(teamCode);
     // Đã có mã hồ sơ → tổ luôn bám tiền tố mã (chống trôi theo tổ người sửa); chưa có mã → theo yêu cầu/cột cũ.
     const storedCode = this.stringValue(data.candidateCode) ?? existing.candidateCode;
@@ -421,7 +450,7 @@ export class CandidatesService {
     if (!this.stringValue(data.vietnameseName) || data.vietnameseName === DRAFT_PLACEHOLDER_NAME) {
       throw new BadRequestException('Vui long nhap ho ten ung vien');
     }
-    await this.assertNoTripleDuplicate(data, id);
+    await this.assertNoTripleDuplicate(data, id, this.dupScope(data, existing));
     await this.validateRequestedTeam(teamCode);
     const teamForNewCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
     // Đã có mã → tổ bám tiền tố mã (chống trôi); chưa có mã → dùng tổ trên để sinh mã mới.
@@ -462,6 +491,7 @@ export class CandidatesService {
     const doomed = await this.prisma.candidate.findUnique({
       where: { id },
       select: {
+        applicantGroupId: true,
         avatarUrl: true,
         lineImageUrl: true,
         limbImages: true,
@@ -480,8 +510,11 @@ export class CandidatesService {
         ...(doomed.tattooImages ?? []),
         ...this.extractStorageUrls(doomed.formSnapshot?.data),
       ];
+      // Hồ sơ nhân bản (nộp nhà máy khác) dùng chung URL ảnh với các hồ sơ cùng nhóm → không xoá ảnh còn được dùng.
+      const stillUsed = doomed.applicantGroupId ? await this.groupImageUrls(doomed.applicantGroupId, id) : new Set<string>();
+      const toRemove = urls.filter((u) => !u || !stillUsed.has(u));
       // Best-effort: lỗi dọn ảnh không được chặn việc xoá hồ sơ.
-      void this.uploads.removeByUrls(urls).catch((err) => console.warn('[candidates.remove] dọn ảnh lỗi', err));
+      void this.uploads.removeByUrls(toRemove).catch((err) => console.warn('[candidates.remove] dọn ảnh lỗi', err));
     }
     return { success: true };
   }
@@ -518,6 +551,196 @@ export class CandidatesService {
     return this.withLegacyFormDataJson(candidate);
   }
 
+  // Chuyển hồ sơ sang công ty/nhà máy khác: nhân bản thành một hồ sơ NHÁP mới ở nhà máy mới, điền sẵn
+  // toàn bộ dữ liệu + lý do chuyển. Hồ sơ cũ giữ nguyên (nhãn "Đã chuyển"). Người dùng rà lại rồi Lưu → complete() cấp mã mới.
+  async reapply(id: string, body: Record<string, unknown>, user: AuthUser) {
+    const brokerId = this.stringValue(body.brokerId);
+    const factoryId = this.stringValue(body.factoryId);
+    const draftSessionId = this.stringValue(body.draftSessionId);
+    if (!draftSessionId) throw new BadRequestException('Thieu draftSessionId');
+    const reason = this.stringValue(body.reason);
+    if (!reason) throw new BadRequestException('Vui long nhap ly do chuyen ho so');
+    if (reason.length > TRANSFER_REASON_MAX) throw new BadRequestException(`Ly do chuyen toi da ${TRANSFER_REASON_MAX} ky tu`);
+
+    const source = await this.prisma.candidate.findUnique({
+      where: { id },
+      include: { familyMembers: true, formSnapshot: true },
+    });
+    if (!source) throw new NotFoundException('Not found');
+    if (source.status !== 'COMPLETED') throw new BadRequestException('Chi chuyen duoc ho so da hoan tat');
+
+    await this.validateBrokerFactory(brokerId, factoryId);
+    const [broker, factory] = await Promise.all([
+      this.prisma.company.findUnique({ where: { id: brokerId! }, select: { name: true, slug: true, formType: true } }),
+      factoryId ? this.prisma.company.findUnique({ where: { id: factoryId }, select: { slug: true } }) : null,
+    ]);
+
+    // Một người chỉ có một hồ sơ trong chuỗi ứng tuyển ở mỗi nhà máy (tính cả nháp → chống bấm 2 lần).
+    const groupId = source.applicantGroupId ?? source.id;
+    const sameTarget: Prisma.CandidateWhereInput = factoryId ? { factoryId } : { brokerId, factoryId: null };
+    const inGroup = await this.prisma.candidate.findFirst({
+      where: { OR: [{ applicantGroupId: groupId }, { id: groupId }], ...sameTarget },
+      select: { id: true, candidateCode: true, status: true },
+    });
+    if (inGroup) {
+      const code = inGroup.candidateCode ? ` (ma ${inGroup.candidateCode})` : inGroup.status === 'DRAFT' ? ' (ban nhap)' : '';
+      throw new ConflictException(`Nguoi lao dong da co ho so o nha may nay${code}`);
+    }
+    // Hồ sơ trùng do người khác nhập tay ở nhà máy mới → báo sớm thay vì đợi lúc Lưu.
+    await this.assertNoTripleDuplicate(
+      { vietnameseName: source.vietnameseName, dateOfBirth: source.dateOfBirth },
+      undefined,
+      { brokerId, factoryId },
+    );
+
+    const formType = this.forms.resolveFormType({
+      brokerSlug: broker?.slug,
+      brokerFormType: broker?.formType,
+      factorySlug: factory?.slug,
+    });
+    const snapshotData = this.reapplySnapshotData(source.formSnapshot?.data, source.formDataJson, formType);
+    const teamCode = (await this.resolveTeamForCode(body.teamCode, user)) || source.teamCode || null;
+
+    const {
+      id: _id,
+      candidateCode: _code,
+      status: _status,
+      draftSessionId: _draft,
+      createdByUserId: _createdBy,
+      teamCode: _team,
+      lastSavedAt: _lastSaved,
+      isVerified: _isVerified,
+      verifiedById: _verifiedById,
+      verifiedByName: _verifiedByName,
+      verifiedAt: _verifiedAt,
+      sourceCandidateId: _sourceId,
+      transferReason: _reason,
+      applicantGroupId: _groupId,
+      brokerId: _brokerId,
+      factoryId: _factoryId,
+      company: _company,
+      formDataJson: _formDataJson,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      familyMembers,
+      formSnapshot: _snapshot,
+      ...profile
+    } = source;
+
+    return this.candidateTx(async (tx) => {
+      if (!source.applicantGroupId) {
+        await tx.candidate.update({ where: { id: source.id }, data: { applicantGroupId: groupId } });
+      }
+      const candidate = await tx.candidate.create({
+        data: {
+          ...profile,
+          status: 'DRAFT',
+          draftSessionId,
+          createdByUserId: user.id,
+          lastSavedAt: new Date(),
+          candidateCode: null,
+          teamCode,
+          company: broker?.name ?? null,
+          brokerId,
+          factoryId,
+          sourceCandidateId: source.id,
+          applicantGroupId: groupId,
+          transferReason: reason,
+          familyMembers: familyMembers.length
+            ? { create: familyMembers.map(({ name, relationship, age, occupation }) => ({ name, relationship, age, occupation })) }
+            : undefined,
+        } as Prisma.CandidateUncheckedCreateInput,
+        include: candidateInclude,
+      });
+      const snapshot = snapshotData ? { parsed: snapshotData, formType } : null;
+      await this.upsertFormSnapshot(tx, candidate.id, snapshot);
+      return this.withLegacyFormDataJson({ ...candidate, formSnapshot: snapshot ? this.snapshotRow(snapshot) : null });
+    });
+  }
+
+  // Lịch sử ứng tuyển: mọi hồ sơ cùng chuỗi nhân bản (kể cả chính nó), cũ → mới.
+  async listApplications(id: string) {
+    const current = await this.prisma.candidate.findUnique({ where: { id }, select: { id: true, applicantGroupId: true } });
+    if (!current) throw new NotFoundException('Not found');
+    if (!current.applicantGroupId) return [];
+    const groupId = current.applicantGroupId;
+    return this.prisma.candidate.findMany({
+      where: { OR: [{ applicantGroupId: groupId }, { id: groupId }] },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        candidateCode: true,
+        status: true,
+        transferReason: true,
+        sourceCandidateId: true,
+        createdAt: true,
+        broker: { select: { id: true, name: true } },
+        factory: { select: { id: true, name: true } },
+      },
+    });
+  }
+
+  // URL ảnh còn được dùng bởi hồ sơ khác cùng chuỗi nhân bản (trừ excludeId).
+  private async groupImageUrls(groupId: string, excludeId: string): Promise<Set<string>> {
+    const siblings = await this.prisma.candidate.findMany({
+      where: { OR: [{ applicantGroupId: groupId }, { id: groupId }], NOT: { id: excludeId } },
+      select: {
+        avatarUrl: true,
+        lineImageUrl: true,
+        limbImages: true,
+        scarImages: true,
+        tattooImages: true,
+        formSnapshot: { select: { data: true } },
+      },
+    });
+    const used = new Set<string>();
+    for (const s of siblings) {
+      for (const u of [s.avatarUrl, s.lineImageUrl, ...s.limbImages, ...s.scarImages, ...s.tattooImages, ...this.extractStorageUrls(s.formSnapshot?.data)]) {
+        if (u) used.add(u);
+      }
+    }
+    return used;
+  }
+
+  // Ảnh có đang dùng chung bởi >= 2 hồ sơ nhân bản không. Dùng để chặn /delete-image xoá ảnh của hồ sơ kia
+  // (vd sửa hồ sơ ở nhà máy B, thay ảnh đại diện → không được xoá file mà hồ sơ ở nhà máy A vẫn dùng).
+  // Chỉ quét hồ sơ có applicantGroupId (số ít) nên rẻ.
+  async isImageShared(url?: string | null): Promise<boolean> {
+    if (!url) return false;
+    const rows = await this.prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
+      SELECT COUNT(*) AS n
+      FROM ${this.prisma.table('Candidate')} c
+      LEFT JOIN ${this.prisma.table('CandidateFormSnapshot')} s ON s."candidateId" = c."id"
+      WHERE c."applicantGroupId" IS NOT NULL
+        AND (
+          c."avatarUrl" = ${url} OR c."lineImageUrl" = ${url}
+          OR ${url} = ANY(c."limbImages") OR ${url} = ANY(c."scarImages") OR ${url} = ANY(c."tattooImages")
+          OR strpos(s."data"::text, ${url}) > 0
+        )
+    `);
+    return Number(rows[0]?.n ?? 0) >= 2;
+  }
+
+  private reapplySnapshotData(
+    data: Prisma.JsonValue | null | undefined,
+    legacyJson: string | null,
+    formType: string,
+  ): Prisma.InputJsonValue | null {
+    let raw: unknown = data ?? null;
+    if (!raw && legacyJson) {
+      try {
+        raw = JSON.parse(legacyJson);
+      } catch {
+        raw = null;
+      }
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const copy = { ...(raw as Record<string, unknown>) };
+    for (const key of REAPPLY_STRIP_SNAPSHOT_KEYS) delete copy[key];
+    copy.formType = formType;
+    return copy as Prisma.InputJsonValue;
+  }
+
   // Sau khi kiểm duyệt, hồ sơ bị khóa: chỉ Admin hoặc chính người đã kiểm duyệt mới được sửa.
   private assertCanEdit(existing: { isVerified: boolean | null; verifiedById: string | null }, user: AuthUser) {
     if (!existing.isVerified) return;
@@ -538,38 +761,60 @@ export class CandidatesService {
   }
 
   // Tìm hồ sơ (đã hoàn tất) trùng: họ tên + ngày sinh. (Quê quán không còn là điều kiện.)
-  private async findTripleDuplicate(name: string, dob: string, _hometown: string, excludeId?: string) {
+  // Phạm vi: chỉ tính trùng TRONG CÙNG nhà máy (hoặc cùng môi giới khi không có nhà máy), để một người
+  // trượt nhà máy A vẫn nộp được nhà máy B. Không truyền scope → so trùng toàn hệ thống như cũ.
+  private async findTripleDuplicate(name: string, dob: string, _hometown: string, excludeId?: string, scope?: DupScope) {
     const dobTrim = dob.trim();
     if (!name.trim() || !dobTrim) return null;
+    const scopeWhere: Prisma.CandidateWhereInput = scope?.factoryId
+      ? { factoryId: scope.factoryId }
+      : scope?.brokerId
+        ? { brokerId: scope.brokerId, factoryId: null }
+        : {};
     const rows = await this.prisma.candidate.findMany({
       where: {
         dateOfBirth: dobTrim,
         status: { not: 'DRAFT' },
+        ...scopeWhere,
         ...(excludeId ? { NOT: { id: excludeId } } : {}),
       },
-      select: { id: true, vietnameseName: true, address: true, candidateCode: true },
+      select: {
+        id: true,
+        vietnameseName: true,
+        address: true,
+        candidateCode: true,
+        factory: { select: { name: true } },
+      },
     });
     const n = this.normName(name);
     return rows.find((r) => this.normName(r.vietnameseName) === n) ?? null;
   }
 
   // Chặn lưu khi trùng họ tên + ngày sinh. Gọi ở create/update/complete (không dùng cho draft).
-  private async assertNoTripleDuplicate(data: Record<string, unknown>, excludeId?: string) {
+  private async assertNoTripleDuplicate(data: Record<string, unknown>, excludeId?: string, scope?: DupScope) {
     const match = await this.findTripleDuplicate(
       this.stringValue(data.vietnameseName) ?? '',
       this.stringValue(data.dateOfBirth) ?? '',
       this.stringValue(data.address) ?? '',
       excludeId,
+      scope,
     );
     if (match) {
       const code = match.candidateCode ? ` (ma ${match.candidateCode})` : '';
-      throw new ConflictException(`Da ton tai ho so trung Ho ten + Ngay sinh${code}`);
+      throw new ConflictException(`Da ton tai ho so trung Ho ten + Ngay sinh trong cung nha may${code}`);
     }
   }
 
+  private dupScope(data: Record<string, unknown>, existing: { brokerId: string | null; factoryId: string | null }): DupScope {
+    return {
+      brokerId: this.stringValue(data.brokerId) ?? existing.brokerId,
+      factoryId: this.stringValue(data.factoryId) ?? existing.factoryId,
+    };
+  }
+
   // Cảnh báo FE: trả về hồ sơ trùng họ tên + ngày sinh (nếu có) để hiển thị trước khi lưu.
-  async checkDuplicateProfile(name?: string, dob?: string, hometown?: string, excludeId?: string) {
-    const match = await this.findTripleDuplicate(name ?? '', dob ?? '', hometown ?? '', excludeId);
+  async checkDuplicateProfile(name?: string, dob?: string, hometown?: string, excludeId?: string, scope?: DupScope) {
+    const match = await this.findTripleDuplicate(name ?? '', dob ?? '', hometown ?? '', excludeId, scope);
     return { duplicate: !!match, match: match ?? null };
   }
 
@@ -655,6 +900,11 @@ export class CandidatesService {
       verifiedByName: _verifiedByName,
       verifiedAt: _verifiedAt,
       nameSearch: _nameSearch,
+      // Liên kết chuyển hồ sơ chỉ đặt qua POST /candidates/:id/reapply (transferReason thì sửa được qua form).
+      sourceCandidateId: _sourceCandidateId,
+      applicantGroupId: _applicantGroupId,
+      source: _source,
+      transfers: _transfers,
       ...data
     } = body;
     return {
