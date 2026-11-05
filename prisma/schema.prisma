@@ -68,7 +68,7 @@ model Company {
 
 model Candidate {
   id                 String               @id @default(uuid())
-  candidateCode      String?
+  candidateCode      String?              @unique
   status             CandidateStatus      @default(COMPLETED)
   draftSessionId     String?
   createdByUserId    String?

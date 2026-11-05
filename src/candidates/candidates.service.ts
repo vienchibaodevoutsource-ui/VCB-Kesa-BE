@@ -73,6 +73,7 @@ const candidateListSelect = {
   verifiedByName: true,
   verifiedAt: true,
   applicantGroupId: true,
+  sourceCandidateId: true,
   transfers: transfersSelect,
   lineImageUrl: true,
   domesticExperience: true,
@@ -300,7 +301,7 @@ export class CandidatesService {
             ...data,
             factoryId,
             nameSearch: this.computeNameSearch(data),
-            candidateCode: candidateCode ?? this.stringValue(data.candidateCode) ?? null,
+            candidateCode: candidateCode ?? null,
             teamCode: resolvedTeamCode,
             status: 'COMPLETED',
             draftSessionId: null,
@@ -314,10 +315,8 @@ export class CandidatesService {
         return this.withLegacyFormDataJson({ ...candidate, formSnapshot: formSnapshot ? this.snapshotRow(formSnapshot) : candidate.formSnapshot });
       });
 
-    if (!data.candidateCode) {
-      if (resolvedTeamCode) return this.codes.withUniqueCandidateCode(resolvedTeamCode, buildCreate);
-    }
-    return buildCreate();
+    // Mã hồ sơ luôn do BE cấp theo bộ đếm toàn cục (không nhận mã trình duyệt gửi lên).
+    return this.codes.withUniqueCandidateCode(resolvedTeamCode, buildCreate);
   }
 
   async createDraft(body: Record<string, unknown>, user: AuthUser) {
@@ -360,7 +359,7 @@ export class CandidatesService {
     if (existing.status !== 'DRAFT') throw new BadRequestException('Chi co the autosave ho so draft');
 
     const draftSessionId = this.stringValue(body.draftSessionId);
-    if (!draftSessionId || existing.draftSessionId !== draftSessionId) {
+    if (!draftSessionId || !this.canContinueDraft(existing, draftSessionId, user)) {
       throw new ForbiddenException('Khong co quyen cap nhat ho so draft nay');
     }
 
@@ -373,10 +372,10 @@ export class CandidatesService {
     await this.validateRequestedTeam(teamCode);
     const teamForNewCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
     // Đã có mã → tổ bám tiền tố mã (chống trôi); chưa có mã → dùng tổ trên để sinh mã mới.
-    const knownCode = existing.candidateCode ?? this.stringValue(data.candidateCode);
+    const knownCode = existing.candidateCode;
     const resolvedTeamCode = this.teamPrefixFromCode(knownCode) ?? teamForNewCode;
 
-    if (!existing.candidateCode && !data.candidateCode) {
+    if (!existing.candidateCode) {
       if (resolvedTeamCode) generatedCode = await this.codes.generateCandidateCode(resolvedTeamCode);
     }
 
@@ -386,7 +385,7 @@ export class CandidatesService {
         where: { id },
         data: {
           ...data,
-          candidateCode: generatedCode ?? this.stringValue(data.candidateCode) ?? existing.candidateCode ?? null,
+          candidateCode: generatedCode ?? existing.candidateCode ?? null,
           nameSearch: this.computeNameSearch(data, existing.vietnameseName),
           teamCode: resolvedTeamCode,
           status: 'DRAFT',
@@ -412,7 +411,7 @@ export class CandidatesService {
     await this.assertNoTripleDuplicate(data, id, this.dupScope(data, existing));
     await this.validateRequestedTeam(teamCode);
     // Đã có mã hồ sơ → tổ luôn bám tiền tố mã (chống trôi theo tổ người sửa); chưa có mã → theo yêu cầu/cột cũ.
-    const storedCode = this.stringValue(data.candidateCode) ?? existing.candidateCode;
+    const storedCode = existing.candidateCode;
     const resolvedTeamCode =
       this.teamPrefixFromCode(storedCode) ?? (teamCode ? normalizeTeamCode(teamCode) : existing.teamCode);
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
@@ -439,7 +438,7 @@ export class CandidatesService {
     if (!existing) throw new NotFoundException('Not found');
     this.assertCanEdit(existing, user);
     const draftSessionId = this.stringValue(body.draftSessionId);
-    if (existing.status === 'DRAFT' && (!draftSessionId || existing.draftSessionId !== draftSessionId)) {
+    if (existing.status === 'DRAFT' && !this.canContinueDraft(existing, draftSessionId, user)) {
       throw new ForbiddenException('Khong co quyen hoan tat ho so draft nay');
     }
 
@@ -454,7 +453,7 @@ export class CandidatesService {
     await this.validateRequestedTeam(teamCode);
     const teamForNewCode = (await this.resolveTeamForCode(teamCode, user)) || existing.teamCode || null;
     // Đã có mã → tổ bám tiền tố mã (chống trôi); chưa có mã → dùng tổ trên để sinh mã mới.
-    const knownCode = existing.candidateCode ?? this.stringValue(data.candidateCode);
+    const knownCode = existing.candidateCode;
     const resolvedTeamCode = this.teamPrefixFromCode(knownCode) ?? teamForNewCode;
     if (!resolvedTeamCode) throw new BadRequestException('Vui long chon ma to ho so (Team Code)');
     await this.prisma.familyMember.deleteMany({ where: { candidateId: id } });
@@ -465,7 +464,7 @@ export class CandidatesService {
           where: { id },
           data: {
             ...data,
-            candidateCode: candidateCode ?? this.stringValue(data.candidateCode) ?? existing.candidateCode ?? null,
+            candidateCode: candidateCode ?? existing.candidateCode ?? null,
             nameSearch: this.computeNameSearch(data, existing.vietnameseName),
             teamCode: resolvedTeamCode,
             status: 'COMPLETED',
@@ -480,7 +479,7 @@ export class CandidatesService {
         return this.withLegacyFormDataJson({ ...candidate, formSnapshot: formSnapshot ? this.snapshotRow(formSnapshot) : candidate.formSnapshot });
       });
 
-    if (!existing.candidateCode && !data.candidateCode) {
+    if (!existing.candidateCode) {
       if (resolvedTeamCode) return this.codes.withUniqueCandidateCode(resolvedTeamCode, buildUpdate);
     }
     return buildUpdate();
@@ -500,22 +499,30 @@ export class CandidatesService {
         formSnapshot: { select: { data: true } },
       },
     });
-    await this.prisma.candidate.delete({ where: { id } });
-    if (doomed) {
-      const urls = [
-        doomed.avatarUrl,
-        doomed.lineImageUrl,
-        ...(doomed.limbImages ?? []),
-        ...(doomed.scarImages ?? []),
-        ...(doomed.tattooImages ?? []),
-        ...this.extractStorageUrls(doomed.formSnapshot?.data),
-      ];
-      // Hồ sơ nhân bản (nộp nhà máy khác) dùng chung URL ảnh với các hồ sơ cùng nhóm → không xoá ảnh còn được dùng.
-      const stillUsed = doomed.applicantGroupId ? await this.groupImageUrls(doomed.applicantGroupId, id) : new Set<string>();
-      const toRemove = urls.filter((u) => !u || !stillUsed.has(u));
-      // Best-effort: lỗi dọn ảnh không được chặn việc xoá hồ sơ.
-      void this.uploads.removeByUrls(toRemove).catch((err) => console.warn('[candidates.remove] dọn ảnh lỗi', err));
+    // Xoá lặp (bấm 2 lần / 2 tab cùng xoá): hồ sơ đã không còn → coi như xoá xong, không ném lỗi 500.
+    if (!doomed) return { success: true, alreadyDeleted: true };
+    try {
+      await this.prisma.candidate.delete({ where: { id } });
+    } catch (error) {
+      // Bị xoá bởi request khác ngay giữa lúc đọc và xoá (P2025) → cũng coi như xong.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+        return { success: true, alreadyDeleted: true };
+      }
+      throw error;
     }
+    const urls = [
+      doomed.avatarUrl,
+      doomed.lineImageUrl,
+      ...(doomed.limbImages ?? []),
+      ...(doomed.scarImages ?? []),
+      ...(doomed.tattooImages ?? []),
+      ...this.extractStorageUrls(doomed.formSnapshot?.data),
+    ];
+    // Hồ sơ nhân bản (nộp nhà máy khác) dùng chung URL ảnh với các hồ sơ cùng nhóm → không xoá ảnh còn được dùng.
+    const stillUsed = doomed.applicantGroupId ? await this.groupImageUrls(doomed.applicantGroupId, id) : new Set<string>();
+    const toRemove = urls.filter((u) => !u || !stillUsed.has(u));
+    // Best-effort: lỗi dọn ảnh không được chặn việc xoá hồ sơ.
+    void this.uploads.removeByUrls(toRemove).catch((err) => console.warn('[candidates.remove] dọn ảnh lỗi', err));
     return { success: true };
   }
 
@@ -741,6 +748,19 @@ export class CandidatesService {
     return copy as Prisma.InputJsonValue;
   }
 
+  // Bản nháp gắn với phiên của một TAB trình duyệt (sessionStorage) — mở ở tab khác là lệch phiên.
+  // Cho nhập tiếp khi: đúng phiên, hoặc chính người tạo bản nháp, hoặc Admin / người có quyền kiểm duyệt
+  // (tab "Hồ sơ nháp" liệt kê mọi bản nháp nên cần mở được từ tab/máy khác).
+  private canContinueDraft(
+    existing: { draftSessionId: string | null; createdByUserId: string | null },
+    draftSessionId: string | null,
+    user: AuthUser,
+  ) {
+    if (draftSessionId && existing.draftSessionId === draftSessionId) return true;
+    if (existing.createdByUserId && existing.createdByUserId === user.id) return true;
+    return user.role === 'ADMIN' || user.canModerate === true;
+  }
+
   // Sau khi kiểm duyệt, hồ sơ bị khóa: chỉ Admin hoặc chính người đã kiểm duyệt mới được sửa.
   private assertCanEdit(existing: { isVerified: boolean | null; verifiedById: string | null }, user: AuthUser) {
     if (!existing.isVerified) return;
@@ -839,6 +859,8 @@ export class CandidatesService {
         phone: true,
         broker: { select: { name: true } },
         factory: { select: { name: true } },
+        // FE dùng để nhận ra hồ sơ cùng chuỗi chuyển hồ sơ (hồ sơ gốc) — không coi là trùng.
+        applicantGroupId: true,
         createdAt: true,
       },
       take: 5,
@@ -900,6 +922,9 @@ export class CandidatesService {
       verifiedByName: _verifiedByName,
       verifiedAt: _verifiedAt,
       nameSearch: _nameSearch,
+      // Mã hồ sơ do BE cấp (bộ đếm toàn cục) và bất biến sau khi cấp — bỏ mã trình duyệt gửi lên để
+      // không ai lưu được mã tự đặt / trùng mã người khác. Hồ sơ đã có mã thì giữ nguyên mã cũ.
+      candidateCode: _clientCandidateCode,
       // Liên kết chuyển hồ sơ chỉ đặt qua POST /candidates/:id/reapply (transferReason thì sửa được qua form).
       sourceCandidateId: _sourceCandidateId,
       applicantGroupId: _applicantGroupId,
@@ -1109,9 +1134,11 @@ export class CandidatesService {
   private async getStats() {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     // Gộp totalAll + maleCount + femaleCount vào MỘT groupBy thay vì 3 count riêng → ít round-trip tới DB.
-    const [genderGroups, recentCount, filterOptions] = await Promise.all([
+    // draftCount cho nhãn tab "Hồ sơ nháp (N)" — gộp vào đây (chạy song song) thay vì FE gọi riêng một request list.
+    const [genderGroups, recentCount, draftCount, filterOptions] = await Promise.all([
       this.prisma.candidate.groupBy({ by: ['gender'], _count: { _all: true } }),
       this.prisma.candidate.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
+      this.prisma.candidate.count({ where: { status: 'DRAFT' } }),
       this.getFilterOptions(),
     ]);
 
@@ -1125,6 +1152,6 @@ export class CandidatesService {
       else if (group.gender === 'Nữ' || group.gender === 'Nu') femaleCount += n;
     }
 
-    return { totalAll, maleCount, femaleCount, recentCount, filterOptions };
+    return { totalAll, maleCount, femaleCount, recentCount, draftCount, filterOptions };
   }
 }
