@@ -154,6 +154,7 @@ model Candidate {
   interviews         InterviewCandidate[]
   formSnapshot       CandidateFormSnapshot?
   partnerSyncs       PartnerSync[]
+  partnerSyncLogs    PartnerSyncLog[]
 
   @@index([status, draftSessionId])
   @@index([createdByUserId])
@@ -197,6 +198,27 @@ model PartnerSync {
   candidate       Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
   @@unique([candidateId, partner])
+}
+
+// Lịch sử từng lần đẩy hồ sơ sang đối tác: lưu nguyên dữ liệu đã gửi (kể cả phần người dùng nhập bổ sung / trả lời
+// phỏng vấn) để sau này tra lại hoặc cung cấp cho khách hàng. Chỉ thêm, không sửa. Xoá hồ sơ vẫn giữ log (candidateId → null).
+model PartnerSyncLog {
+  id              String     @id @default(uuid())
+  candidateId     String?
+  candidateCode   String?    // giữ lại mã hồ sơ phòng khi hồ sơ bị xoá
+  partner         String
+  projectCode     String
+  partnerWorkerId String?
+  status          String     // SENT | FAILED
+  error           String?
+  extras          Json       @default("{}") // người dùng nhập bổ sung (chỉ phần khác giá trị map từ form)
+  answers         Json       @default("{}") // câu trả lời người dùng nhập (chỉ phần khác giá trị kesa tự điền)
+  sent            Json       // nguyên application + worker (kèm interview) đã gửi, không có accessCode
+  sentById        String?
+  createdAt       DateTime   @default(now())
+  candidate       Candidate? @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+
+  @@index([candidateId, createdAt])
 }
 
 model FamilyMember {
