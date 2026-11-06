@@ -154,12 +154,7 @@ export class PartnerSyncService {
     const now = new Date().toISOString();
     // Không gửi raw: 長青 không đọc cũng không lưu (nhiều dữ liệu cá nhân, không có format cố định).
     // Ô trống = 長青 giữ nguyên giá trị cũ, kesa không xoá được trường bên họ.
-    const payload = JSON.stringify({
-      event: 'candidate.upserted',
-      sentAt: now,
-      // Đẩy thủ công: phần nhập bổ sung có thể đổi mà hồ sơ không đổi → version theo thời điểm đẩy, không theo updatedAt.
-      version: now,
-      accessCode: this.accessCode,
+    const sent = {
       application: {
         projectCode,
         introducer: extras.introducer ?? mappedValue(EXTRA_FIELDS[0], worker, candidate),
@@ -170,6 +165,14 @@ export class PartnerSyncService {
         // Key theo questionId (長青 khuyên dùng): họ sửa câu chữ vẫn khớp; câu không có trong bộ câu hỏi bị bỏ qua.
         interview: finalAnswers,
       },
+    };
+    const payload = JSON.stringify({
+      event: 'candidate.upserted',
+      sentAt: now,
+      // Đẩy thủ công: phần nhập bổ sung có thể đổi mà hồ sơ không đổi → version theo thời điểm đẩy, không theo updatedAt.
+      version: now,
+      accessCode: this.accessCode,
+      ...sent,
     });
 
     const saved = {
@@ -178,23 +181,46 @@ export class PartnerSyncService {
       answers: answers as Prisma.InputJsonObject,
       sentById: user.id,
     };
+    // Mỗi lần đẩy thêm 1 dòng lịch sử, giữ nguyên dữ liệu đã gửi (PartnerSync chỉ giữ bản mới nhất, bị ghi đè).
+    const log = (status: 'SENT' | 'FAILED', partnerWorkerId: string | null, error: string | null) =>
+      this.prisma.partnerSyncLog.create({
+        data: {
+          ...saved,
+          candidateId,
+          candidateCode: candidate.candidateCode,
+          partner: PARTNER,
+          partnerWorkerId,
+          status,
+          error,
+          sent: sent as unknown as Prisma.InputJsonObject,
+          createdAt: new Date(now),
+        },
+      });
     try {
       const response = await this.post(payload);
       // version không mới hơn lần đã lưu bên 長青 → họ không ghi gì; không coi là đã đẩy.
       if (response.skipped === 'stale') throw new Error('長青 bỏ qua vì version không mới hơn lần đẩy trước, chưa ghi gì — hãy đẩy lại');
-      const sync = await this.saveSync(candidateId, {
-        ...saved,
-        status: 'SENT',
-        lastError: null,
-        lastSentAt: new Date(now),
-        lastSentVersion: candidate.updatedAt,
-        partnerWorkerId: response.workerId || workerId,
-        questionSnapshot: set ? (toSnapshot(set) as Prisma.InputJsonObject) : Prisma.DbNull,
-      });
+      const partnerWorkerId = response.workerId || workerId;
+      const [sync] = await this.prisma.$transaction([
+        this.saveSync(candidateId, {
+          ...saved,
+          status: 'SENT',
+          lastError: null,
+          lastSentAt: new Date(now),
+          lastSentVersion: candidate.updatedAt,
+          partnerWorkerId,
+          questionSnapshot: set ? (toSnapshot(set) as Prisma.InputJsonObject) : Prisma.DbNull,
+        }),
+        log('SENT', partnerWorkerId, null),
+      ]);
       this.logger.log(`Đã đẩy hồ sơ ${candidate.candidateCode ?? candidate.id} vào dự án ${projectCode}`);
       return this.syncView(sync, candidate.updatedAt);
     } catch (err) {
-      await this.saveSync(candidateId, { ...saved, status: 'FAILED', lastError: errorMessage(err).slice(0, 1000) });
+      const error = errorMessage(err).slice(0, 1000);
+      await this.prisma.$transaction([
+        this.saveSync(candidateId, { ...saved, status: 'FAILED', lastError: error }),
+        log('FAILED', workerId, error),
+      ]);
       throw new BadGatewayException(`Đẩy sang 長青 thất bại: ${errorMessage(err)}`);
     }
   }
