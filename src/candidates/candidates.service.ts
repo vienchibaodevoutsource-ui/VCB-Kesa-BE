@@ -10,9 +10,14 @@ import { PrismaService } from '../prisma/prisma.service';
 import { UploadsService } from '../uploads/uploads.service';
 import { sanitizeImageValues } from '../common/utils/image-sanitizer';
 
+// Xoá mềm: hồ sơ có deletedAt nằm trong "Thùng rác". Mọi truy vấn hồ sơ đang dùng phải kèm điều kiện này.
+// Ngoại lệ có chủ đích: bộ đếm mã hồ sơ (candidate-codes) và isImageShared vẫn tính cả hồ sơ đã xoá —
+// để không cấp lại mã cũ và không xoá ảnh của hồ sơ còn có thể được khôi phục.
+const NOT_DELETED = { deletedAt: null };
+
 // Hồ sơ đã chuyển đi (bản mới đã Lưu) — để gắn nhãn "Đã chuyển → Nhà máy B".
 const transfersSelect = {
-  where: { status: 'COMPLETED' as const },
+  where: { status: 'COMPLETED' as const, deletedAt: null },
   orderBy: { createdAt: 'desc' as const },
   take: 1,
   select: {
@@ -79,6 +84,8 @@ const candidateListSelect = {
   domesticExperience: true,
   overseasExperience: true,
   note: true,
+  deletedAt: true,
+  deletedByName: true,
   // KHÔNG select formDataJson / formSnapshot.data ở đây: 2 cột này nhúng ảnh base64
   // (mỗi hồ sơ tới ~25MB). Đọc nguyên blob mỗi lần list = đốt egress Supabase.
   // 4 trường hiển thị (mathScore/beanCount/lensCheck/shiftChoice) được trích riêng
@@ -150,14 +157,20 @@ export class CandidatesService {
     return this.prisma.$transaction(fn, CANDIDATE_TX_OPTIONS);
   }
 
-  async list(query: Record<string, unknown>) {
+  async list(query: Record<string, unknown>, user?: AuthUser) {
     if (query.statsOnly === '1') {
       return { stats: await this.getStats() };
+    }
+
+    // Thùng rác (hồ sơ đã xoá mềm) chỉ Admin được xem.
+    if (query.trash === '1' && user?.role !== 'ADMIN') {
+      throw new ForbiddenException('Chi Admin moi xem duoc thung rac');
     }
 
     if (!this.isCandidateListRequest(query)) {
       return {
         data: await this.prisma.candidate.findMany({
+          where: NOT_DELETED,
           orderBy: { createdAt: 'desc' },
           select: candidateAllSelect,
         }),
@@ -169,7 +182,9 @@ export class CandidatesService {
     const pageSize = Math.min(200, Math.max(1, Number.parseInt(String(query.pageSize ?? '10'), 10) || 10));
     const sortBy = String(query.sortBy ?? 'newest');
     const where = await this.buildWhere(query);
-    const orderBy = this.buildOrderBy(sortBy);
+    // Thùng rác: mặc định xếp theo lúc xoá, mới xoá lên đầu.
+    const orderBy: Prisma.CandidateOrderByWithRelationInput[] =
+      query.trash === '1' && sortBy === 'newest' ? [{ deletedAt: 'desc' }] : this.buildOrderBy(sortBy);
     const includeStats = query.stats !== '0';
 
     // count chạy SONG SONG với findMany thay vì chặn trước nó: mỗi lượt đi-về qua pooler
@@ -275,7 +290,7 @@ export class CandidatesService {
     // phát mỗi quan hệ một câu, mà mỗi lượt đi-về qua transaction pooler tốn 300-500ms
     // nên riêng việc mở một hồ sơ đã ngốn vài giây.
     const candidate = await this.prisma.candidate.findUnique({
-      where: { id },
+      where: { id, ...NOT_DELETED },
       include: candidateInclude,
       relationLoadStrategy: 'join',
     });
@@ -354,7 +369,7 @@ export class CandidatesService {
   }
 
   async autosaveDraft(id: string, body: Record<string, unknown>, user: AuthUser) {
-    const existing = await this.prisma.candidate.findUnique({ where: { id } });
+    const existing = await this.prisma.candidate.findUnique({ where: { id, ...NOT_DELETED } });
     if (!existing) throw new NotFoundException('Not found');
     if (existing.status !== 'DRAFT') throw new BadRequestException('Chi co the autosave ho so draft');
 
@@ -402,7 +417,7 @@ export class CandidatesService {
   }
 
   async update(id: string, body: Record<string, unknown>, user: AuthUser) {
-    const existing = await this.prisma.candidate.findUnique({ where: { id } });
+    const existing = await this.prisma.candidate.findUnique({ where: { id, ...NOT_DELETED } });
     if (!existing) throw new NotFoundException('Not found');
     this.assertCanEdit(existing, user);
     const { familyMembers, teamCode, data } = this.cleanCandidatePayload(body);
@@ -434,7 +449,7 @@ export class CandidatesService {
   }
 
   async complete(id: string, body: Record<string, unknown>, user: AuthUser) {
-    const existing = await this.prisma.candidate.findUnique({ where: { id } });
+    const existing = await this.prisma.candidate.findUnique({ where: { id, ...NOT_DELETED } });
     if (!existing) throw new NotFoundException('Not found');
     this.assertCanEdit(existing, user);
     const draftSessionId = this.stringValue(body.draftSessionId);
@@ -485,55 +500,44 @@ export class CandidatesService {
     return buildUpdate();
   }
 
-  async remove(id: string) {
-    // Gom URL ảnh (cột + snapshot) TRƯỚC khi xoá row để còn dọn file trong Storage, tránh mồ côi.
-    const doomed = await this.prisma.candidate.findUnique({
-      where: { id },
-      select: {
-        applicantGroupId: true,
-        avatarUrl: true,
-        lineImageUrl: true,
-        limbImages: true,
-        scarImages: true,
-        tattooImages: true,
-        formSnapshot: { select: { data: true } },
-      },
+  // Xoá MỀM: chỉ đánh dấu deletedAt — dữ liệu, bảng con (người thân, snapshot, đẩy 長青…) và ảnh
+  // đều giữ nguyên để Admin khôi phục được từ "Thùng rác". Không dọn ảnh ở đây.
+  async remove(id: string, user?: AuthUser) {
+    // updateMany + điều kiện deletedAt = null: xoá lặp (bấm 2 lần / 2 tab cùng xoá) không ghi đè
+    // người/thời điểm xoá đầu tiên và không ném lỗi.
+    const { count } = await this.prisma.candidate.updateMany({
+      where: { id, ...NOT_DELETED },
+      data: { deletedAt: new Date(), deletedById: user?.id ?? null, deletedByName: user?.name ?? null },
     });
-    // Xoá lặp (bấm 2 lần / 2 tab cùng xoá): hồ sơ đã không còn → coi như xoá xong, không ném lỗi 500.
-    if (!doomed) return { success: true, alreadyDeleted: true };
-    try {
-      await this.prisma.candidate.delete({ where: { id } });
-    } catch (error) {
-      // Bị xoá bởi request khác ngay giữa lúc đọc và xoá (P2025) → cũng coi như xong.
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
-        return { success: true, alreadyDeleted: true };
-      }
-      throw error;
+    if (count === 0) {
+      const exists = await this.prisma.candidate.findUnique({ where: { id }, select: { id: true } });
+      if (!exists) throw new NotFoundException('Not found');
+      return { success: true, alreadyDeleted: true };
     }
-    const urls = [
-      doomed.avatarUrl,
-      doomed.lineImageUrl,
-      ...(doomed.limbImages ?? []),
-      ...(doomed.scarImages ?? []),
-      ...(doomed.tattooImages ?? []),
-      ...this.extractStorageUrls(doomed.formSnapshot?.data),
-    ];
-    // Hồ sơ nhân bản (nộp nhà máy khác) dùng chung URL ảnh với các hồ sơ cùng nhóm → không xoá ảnh còn được dùng.
-    const stillUsed = doomed.applicantGroupId ? await this.groupImageUrls(doomed.applicantGroupId, id) : new Set<string>();
-    const toRemove = urls.filter((u) => !u || !stillUsed.has(u));
-    // Best-effort: lỗi dọn ảnh không được chặn việc xoá hồ sơ.
-    void this.uploads.removeByUrls(toRemove).catch((err) => console.warn('[candidates.remove] dọn ảnh lỗi', err));
     return { success: true };
   }
 
-  // Trích mọi public URL ảnh nằm trong snapshot JSON (bỏ qua base64 / text khác).
-  // Nhận cả URL Cloudinary (nơi lưu hiện tại) lẫn URL Supabase Storage của hồ sơ cũ.
-  private extractStorageUrls(data: Prisma.JsonValue | null | undefined): string[] {
-    if (data === null || data === undefined) return [];
-    const json = JSON.stringify(data);
-    const cloudinary = json.match(/https?:\/\/res\.cloudinary\.com\/[^"'\\ ]+/g) ?? [];
-    const supabase = json.match(/https?:\/\/[^"'\\ ]+\/object\/public\/[^"'\\ ]+/g) ?? [];
-    return [...cloudinary, ...supabase];
+  // Khôi phục hồ sơ từ Thùng rác (chỉ Admin — guard đặt ở controller).
+  async restore(id: string) {
+    const doomed = await this.prisma.candidate.findUnique({
+      where: { id },
+      select: { deletedAt: true, status: true, vietnameseName: true, dateOfBirth: true, brokerId: true, factoryId: true },
+    });
+    if (!doomed) throw new NotFoundException('Not found');
+    if (!doomed.deletedAt) return { success: true, alreadyRestored: true };
+    // Trong lúc hồ sơ nằm thùng rác có thể đã có người nhập lại đúng người đó ở cùng nhà máy → chặn để không sinh trùng.
+    if (doomed.status === 'COMPLETED') {
+      await this.assertNoTripleDuplicate(
+        { vietnameseName: doomed.vietnameseName, dateOfBirth: doomed.dateOfBirth },
+        id,
+        { brokerId: doomed.brokerId, factoryId: doomed.factoryId },
+      );
+    }
+    await this.prisma.candidate.update({
+      where: { id },
+      data: { deletedAt: null, deletedById: null, deletedByName: null },
+    });
+    return { success: true };
   }
 
   // Kiểm duyệt / bỏ kiểm duyệt hồ sơ. Chỉ Admin hoặc tài khoản được cấp quyền (canModerate) mới được phép.
@@ -545,7 +549,7 @@ export class CandidatesService {
     const allowed = actor?.role === 'ADMIN' || actor?.canModerate === true;
     if (!allowed) throw new ForbiddenException('Tai khoan khong co quyen kiem duyet');
 
-    const existing = await this.prisma.candidate.findUnique({ where: { id }, select: { id: true } });
+    const existing = await this.prisma.candidate.findUnique({ where: { id, ...NOT_DELETED }, select: { id: true } });
     if (!existing) throw new NotFoundException('Not found');
 
     const candidate = await this.prisma.candidate.update({
@@ -570,7 +574,7 @@ export class CandidatesService {
     if (reason.length > TRANSFER_REASON_MAX) throw new BadRequestException(`Ly do chuyen toi da ${TRANSFER_REASON_MAX} ky tu`);
 
     const source = await this.prisma.candidate.findUnique({
-      where: { id },
+      where: { id, ...NOT_DELETED },
       include: { familyMembers: true, formSnapshot: true },
     });
     if (!source) throw new NotFoundException('Not found');
@@ -586,7 +590,7 @@ export class CandidatesService {
     const groupId = source.applicantGroupId ?? source.id;
     const sameTarget: Prisma.CandidateWhereInput = factoryId ? { factoryId } : { brokerId, factoryId: null };
     const inGroup = await this.prisma.candidate.findFirst({
-      where: { OR: [{ applicantGroupId: groupId }, { id: groupId }], ...sameTarget },
+      where: { OR: [{ applicantGroupId: groupId }, { id: groupId }], ...sameTarget, ...NOT_DELETED },
       select: { id: true, candidateCode: true, status: true },
     });
     if (inGroup) {
@@ -622,6 +626,9 @@ export class CandidatesService {
       verifiedAt: _verifiedAt,
       sourceCandidateId: _sourceId,
       transferReason: _reason,
+      deletedAt: _deletedAt,
+      deletedById: _deletedById,
+      deletedByName: _deletedByName,
       applicantGroupId: _groupId,
       brokerId: _brokerId,
       factoryId: _factoryId,
@@ -667,12 +674,12 @@ export class CandidatesService {
 
   // Lịch sử ứng tuyển: mọi hồ sơ cùng chuỗi nhân bản (kể cả chính nó), cũ → mới.
   async listApplications(id: string) {
-    const current = await this.prisma.candidate.findUnique({ where: { id }, select: { id: true, applicantGroupId: true } });
+    const current = await this.prisma.candidate.findUnique({ where: { id, ...NOT_DELETED }, select: { id: true, applicantGroupId: true } });
     if (!current) throw new NotFoundException('Not found');
     if (!current.applicantGroupId) return [];
     const groupId = current.applicantGroupId;
     return this.prisma.candidate.findMany({
-      where: { OR: [{ applicantGroupId: groupId }, { id: groupId }] },
+      where: { OR: [{ applicantGroupId: groupId }, { id: groupId }], ...NOT_DELETED },
       orderBy: { createdAt: 'asc' },
       select: {
         id: true,
@@ -685,28 +692,6 @@ export class CandidatesService {
         factory: { select: { id: true, name: true } },
       },
     });
-  }
-
-  // URL ảnh còn được dùng bởi hồ sơ khác cùng chuỗi nhân bản (trừ excludeId).
-  private async groupImageUrls(groupId: string, excludeId: string): Promise<Set<string>> {
-    const siblings = await this.prisma.candidate.findMany({
-      where: { OR: [{ applicantGroupId: groupId }, { id: groupId }], NOT: { id: excludeId } },
-      select: {
-        avatarUrl: true,
-        lineImageUrl: true,
-        limbImages: true,
-        scarImages: true,
-        tattooImages: true,
-        formSnapshot: { select: { data: true } },
-      },
-    });
-    const used = new Set<string>();
-    for (const s of siblings) {
-      for (const u of [s.avatarUrl, s.lineImageUrl, ...s.limbImages, ...s.scarImages, ...s.tattooImages, ...this.extractStorageUrls(s.formSnapshot?.data)]) {
-        if (u) used.add(u);
-      }
-    }
-    return used;
   }
 
   // Ảnh có đang dùng chung bởi >= 2 hồ sơ nhân bản không. Dùng để chặn /delete-image xoá ảnh của hồ sơ kia
@@ -795,6 +780,7 @@ export class CandidatesService {
       where: {
         dateOfBirth: dobTrim,
         status: { not: 'DRAFT' },
+        ...NOT_DELETED,
         ...scopeWhere,
         ...(excludeId ? { NOT: { id: excludeId } } : {}),
       },
@@ -849,7 +835,7 @@ export class CandidatesService {
     if (or.length === 0) return { duplicates: [] };
 
     const duplicates = await this.prisma.candidate.findMany({
-      where: { OR: or, ...(excludeId ? { NOT: { id: excludeId } } : {}) },
+      where: { OR: or, ...NOT_DELETED, ...(excludeId ? { NOT: { id: excludeId } } : {}) },
       select: {
         id: true,
         vietnameseName: true,
@@ -1051,13 +1037,14 @@ export class CandidatesService {
   }
 
   private isCandidateListRequest(query: Record<string, unknown>) {
-    return ['page', 'pageSize', 'search', 'gender', 'education', 'brokerId', 'factoryId', 'fromDate', 'toDate', 'sortBy', 'status', 'draftSessionId', 'isVerified', 'candidateCode'].some(
+    return ['trash', 'page','pageSize', 'search', 'gender', 'education', 'brokerId', 'factoryId', 'fromDate', 'toDate', 'sortBy', 'status', 'draftSessionId', 'isVerified', 'candidateCode'].some(
       (key) => query[key] !== undefined,
     );
   }
 
   private async buildWhere(query: Record<string, unknown>): Promise<Prisma.CandidateWhereInput> {
-    const and: Prisma.CandidateWhereInput[] = [];
+    // trash=1 → chỉ hồ sơ đã xoá mềm (Thùng rác); còn lại luôn loại hồ sơ đã xoá.
+    const and: Prisma.CandidateWhereInput[] = [query.trash === '1' ? { deletedAt: { not: null } } : NOT_DELETED];
     const search = String(query.search ?? '').trim();
     if (query.status === 'DRAFT' || query.status === 'COMPLETED') and.push({ status: query.status });
     if (query.draftSessionId) and.push({ draftSessionId: String(query.draftSessionId) });
@@ -1111,7 +1098,7 @@ export class CandidatesService {
 
     const [educationRows, brokers] = await Promise.all([
       this.prisma.candidate.findMany({
-        where: { education: { not: null } },
+        where: { education: { not: null }, ...NOT_DELETED },
         distinct: ['education'],
         select: { education: true },
         orderBy: { education: 'asc' },
@@ -1136,9 +1123,9 @@ export class CandidatesService {
     // Gộp totalAll + maleCount + femaleCount vào MỘT groupBy thay vì 3 count riêng → ít round-trip tới DB.
     // draftCount cho nhãn tab "Hồ sơ nháp (N)" — gộp vào đây (chạy song song) thay vì FE gọi riêng một request list.
     const [genderGroups, recentCount, draftCount, filterOptions] = await Promise.all([
-      this.prisma.candidate.groupBy({ by: ['gender'], _count: { _all: true } }),
-      this.prisma.candidate.count({ where: { createdAt: { gte: sevenDaysAgo } } }),
-      this.prisma.candidate.count({ where: { status: 'DRAFT' } }),
+      this.prisma.candidate.groupBy({ by: ['gender'], where: NOT_DELETED, _count: { _all: true } }),
+      this.prisma.candidate.count({ where: { createdAt: { gte: sevenDaysAgo }, ...NOT_DELETED } }),
+      this.prisma.candidate.count({ where: { status: 'DRAFT', ...NOT_DELETED } }),
       this.getFilterOptions(),
     ]);
 

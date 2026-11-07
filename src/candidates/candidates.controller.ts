@@ -1,6 +1,9 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Role } from '@prisma/client';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
 import { AuthGuard } from '../common/guards/auth.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
 import { AuthUser } from '../common/types';
 import { CandidatesService } from './candidates.service';
 
@@ -10,8 +13,8 @@ export class CandidatesController {
   constructor(private readonly candidates: CandidatesService) {}
 
   @Get()
-  list(@Query() query: Record<string, unknown>) {
-    return this.candidates.list(query);
+  list(@Query() query: Record<string, unknown>, @CurrentUser() user: AuthUser) {
+    return this.candidates.list(query, user);
   }
 
   @Post()
@@ -81,8 +84,16 @@ export class CandidatesController {
     return { data: await this.candidates.complete(id, body, user) };
   }
 
+  // Xoá mềm — hồ sơ chuyển vào Thùng rác.
   @Delete(':id')
-  async remove(@Param('id') id: string) {
-    return { data: await this.candidates.remove(id) };
+  async remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return { data: await this.candidates.remove(id, user) };
+  }
+
+  @Post(':id/restore')
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  async restore(@Param('id') id: string) {
+    return { data: await this.candidates.restore(id) };
   }
 }

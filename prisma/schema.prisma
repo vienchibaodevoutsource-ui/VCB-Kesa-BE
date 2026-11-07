@@ -89,6 +89,11 @@ model Candidate {
   transfers          Candidate[]          @relation("CandidateTransfer")
   applicantGroupId   String?
   transferReason     String?
+  // Xoá mềm: bấm Xoá chỉ đánh dấu, dữ liệu + ảnh vẫn còn để Admin khôi phục từ "Thùng rác".
+  // Mọi truy vấn hồ sơ đang dùng phải lọc deletedAt = null (xem NOT_DELETED trong candidates.service).
+  deletedAt          DateTime?
+  deletedById        String?
+  deletedByName      String?
   nameSearch         String?
   chineseName        String?
   vietnameseName     String
@@ -156,6 +161,7 @@ model Candidate {
   partnerSyncs       PartnerSync[]
 
   @@index([status, draftSessionId])
+  @@index([deletedAt])
   @@index([createdByUserId])
   @@index([teamCode])
   @@index([status, createdAt])

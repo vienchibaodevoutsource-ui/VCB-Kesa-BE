@@ -239,7 +239,7 @@ export class PartnerSyncService {
 
   private async loadCandidate(id: string) {
     const candidate = await this.prisma.candidate.findUnique({
-      where: { id },
+      where: { id, deletedAt: null },
       include: { familyMembers: true, broker: true, factory: true, formSnapshot: true, createdBy: { select: { name: true } } },
     });
     if (!candidate) throw new NotFoundException('Không tìm thấy hồ sơ');

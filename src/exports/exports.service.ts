@@ -107,7 +107,7 @@ export class ExportsService {
       const candidateId = this.stringValue(body.candidateId);
       if (!candidateId) throw new BadRequestException('Thieu candidateId');
       const candidate = await this.prisma.candidate.findUnique({
-        where: { id: candidateId },
+        where: { id: candidateId, deletedAt: null },
         include: { broker: true, factory: true, familyMembers: true, formSnapshot: true },
       });
       if (!candidate) throw new NotFoundException('Khong tim thay ho so');
@@ -160,7 +160,7 @@ export class ExportsService {
     const candidateIds = Array.isArray(body.candidateIds) ? body.candidateIds.filter((id): id is string => typeof id === 'string') : [];
     if (!candidateIds.length) throw new BadRequestException('Chua chon ho so nao');
     const candidates = await this.prisma.candidate.findMany({
-      where: { id: { in: candidateIds } },
+      where: { id: { in: candidateIds }, deletedAt: null },
       include: {
         interviews: { include: { interviewList: true } },
         familyMembers: true,

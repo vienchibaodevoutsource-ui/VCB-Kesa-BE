@@ -162,8 +162,8 @@ export class CompatibilityController {
 
   @Get('candidates')
   @UseGuards(AuthGuard)
-  async listCandidates(@Query() query: Record<string, unknown>) {
-    return this.unwrapList(await this.candidates.list(query));
+  async listCandidates(@Query() query: Record<string, unknown>, @CurrentUser() user: AuthUser) {
+    return this.unwrapList(await this.candidates.list(query, user));
   }
 
   @Post('candidates')
@@ -244,10 +244,18 @@ export class CompatibilityController {
     return this.candidates.listApplications(id);
   }
 
+  // Xoá mềm — hồ sơ chuyển vào Thùng rác, Admin khôi phục qua POST candidates/:id/restore.
   @Delete('candidates/:id')
   @UseGuards(AuthGuard)
-  removeCandidate(@Param('id') id: string) {
-    return this.candidates.remove(id);
+  removeCandidate(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.candidates.remove(id, user);
+  }
+
+  @Post('candidates/:id/restore')
+  @UseGuards(AuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  restoreCandidate(@Param('id') id: string) {
+    return this.candidates.restore(id);
   }
 
   @Post('translate')
