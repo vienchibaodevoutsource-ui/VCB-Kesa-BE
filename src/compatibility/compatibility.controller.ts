@@ -197,9 +197,12 @@ export class CompatibilityController {
     @Query('excludeId') excludeId?: string,
     @Query('brokerId') brokerId?: string,
     @Query('factoryId') factoryId?: string,
+    @Query('applicantGroupId') applicantGroupId?: string,
   ) {
+    // hometown vẫn nhận cho FE cũ nhưng không còn là điều kiện trùng.
+    void hometown;
     const scope = brokerId || factoryId ? { brokerId, factoryId } : undefined;
-    return this.candidates.checkDuplicateProfile(name, dob, hometown, excludeId, scope);
+    return this.candidates.checkDuplicateProfile(name, dob, excludeId, scope, applicantGroupId);
   }
 
   @Get('candidates/:id')

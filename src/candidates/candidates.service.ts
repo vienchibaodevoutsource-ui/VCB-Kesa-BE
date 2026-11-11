@@ -3,7 +3,7 @@ import { CandidateStatus, Prisma } from '@prisma/client';
 import { CandidateCodesService } from '../candidate-codes/candidate-codes.service';
 import { AuthUser } from '../common/types';
 import { clampPage } from '../common/utils/pagination';
-import { buildCandidateNameSearch, normalizeSearch } from '../common/utils/normalize';
+import { buildCandidateNameSearch, dobVariants, normalizeSearch, personNameKey } from '../common/utils/normalize';
 import { normalizeTeamCode, validateTeamCodeFormat } from '../common/utils/team-code';
 import { FormsService } from '../forms/forms.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -760,51 +760,52 @@ export class CandidatesService {
     return buildCandidateNameSearch([vn, cn]) || null;
   }
 
-  // Chuẩn hoá để so trùng: bỏ hoa/thường + gộp khoảng trắng, GIỮ dấu tiếng Việt.
-  private normName(value: unknown) {
-    return this.stringValue(value)?.trim().replace(/\s+/g, ' ').toLowerCase() ?? '';
-  }
-
-  // Tìm hồ sơ (đã hoàn tất) trùng: họ tên + ngày sinh. (Quê quán không còn là điều kiện.)
-  // Phạm vi: chỉ tính trùng TRONG CÙNG nhà máy (hoặc cùng môi giới khi không có nhà máy), để một người
-  // trượt nhà máy A vẫn nộp được nhà máy B. Không truyền scope → so trùng toàn hệ thống như cũ.
-  private async findTripleDuplicate(name: string, dob: string, _hometown: string, excludeId?: string, scope?: DupScope) {
-    const dobTrim = dob.trim();
-    if (!name.trim() || !dobTrim) return null;
-    const scopeWhere: Prisma.CandidateWhereInput = scope?.factoryId
-      ? { factoryId: scope.factoryId }
-      : scope?.brokerId
-        ? { brokerId: scope.brokerId, factoryId: null }
-        : {};
+  // Mọi hồ sơ (đã hoàn tất, chưa xoá) trùng họ tên + ngày sinh trên TOÀN hệ thống — không cần trùng SĐT/CCCD.
+  // Tên so bằng personNameKey (bỏ qua hoa/thường, khoảng trắng, NFC/NFD, kiểu đặt dấu "Hoà"/"Hòa");
+  // ngày sinh nhận mọi cách ghi của cùng một ngày (19/03/2006, 19/3/2006, 2006-03-19…).
+  private async findNameDobMatches(name: string, dob: string, excludeId?: string) {
+    const key = personNameKey(name);
+    const dobs = dobVariants(dob);
+    if (!key || !dobs.length) return [];
     const rows = await this.prisma.candidate.findMany({
       where: {
-        dateOfBirth: dobTrim,
+        dateOfBirth: { in: dobs },
         status: { not: 'DRAFT' },
         ...NOT_DELETED,
-        ...scopeWhere,
         ...(excludeId ? { NOT: { id: excludeId } } : {}),
       },
+      orderBy: { createdAt: 'asc' },
       select: {
         id: true,
         vietnameseName: true,
         address: true,
         candidateCode: true,
+        brokerId: true,
+        factoryId: true,
+        applicantGroupId: true,
+        broker: { select: { name: true } },
         factory: { select: { name: true } },
       },
     });
-    const n = this.normName(name);
-    return rows.find((r) => this.normName(r.vietnameseName) === n) ?? null;
+    return rows.filter((r) => personNameKey(r.vietnameseName) === key);
   }
 
-  // Chặn lưu khi trùng họ tên + ngày sinh. Gọi ở create/update/complete (không dùng cho draft).
+  // Cùng nhà máy (hoặc cùng môi giới khi không có nhà máy) → trùng bị CHẶN lưu. Khác nhà máy chỉ cảnh báo,
+  // để một người trượt nhà máy A vẫn nộp được nhà máy B. Không có scope → coi như toàn hệ thống.
+  private inDupScope(row: { brokerId: string | null; factoryId: string | null }, scope?: DupScope) {
+    if (scope?.factoryId) return row.factoryId === scope.factoryId;
+    if (scope?.brokerId) return row.brokerId === scope.brokerId && !row.factoryId;
+    return true;
+  }
+
+  // Chặn lưu khi trùng họ tên + ngày sinh trong cùng nhà máy. Gọi ở create/update/complete/reapply/restore (không dùng cho draft).
   private async assertNoTripleDuplicate(data: Record<string, unknown>, excludeId?: string, scope?: DupScope) {
-    const match = await this.findTripleDuplicate(
+    const matches = await this.findNameDobMatches(
       this.stringValue(data.vietnameseName) ?? '',
       this.stringValue(data.dateOfBirth) ?? '',
-      this.stringValue(data.address) ?? '',
       excludeId,
-      scope,
     );
+    const match = matches.find((r) => this.inDupScope(r, scope));
     if (match) {
       const code = match.candidateCode ? ` (ma ${match.candidateCode})` : '';
       throw new ConflictException(`Da ton tai ho so trung Ho ten + Ngay sinh trong cung nha may${code}`);
@@ -818,10 +819,17 @@ export class CandidatesService {
     };
   }
 
-  // Cảnh báo FE: trả về hồ sơ trùng họ tên + ngày sinh (nếu có) để hiển thị trước khi lưu.
-  async checkDuplicateProfile(name?: string, dob?: string, hometown?: string, excludeId?: string, scope?: DupScope) {
-    const match = await this.findTripleDuplicate(name ?? '', dob ?? '', hometown ?? '', excludeId, scope);
-    return { duplicate: !!match, match: match ?? null };
+  // Cảnh báo FE trước khi lưu: mọi hồ sơ trùng họ tên + ngày sinh ở BẤT KỲ nhà máy nào.
+  // blocking = có hồ sơ trùng cùng nhà máy (bấm Lưu sẽ bị chặn); còn lại chỉ là cảnh báo.
+  // Hồ sơ cùng chuỗi chuyển hồ sơ (applicantGroupId) là cùng một người đã được chuyển → không báo.
+  async checkDuplicateProfile(name?: string, dob?: string, excludeId?: string, scope?: DupScope, applicantGroupId?: string) {
+    const all = await this.findNameDobMatches(name ?? '', dob ?? '', excludeId);
+    const matches = all
+      .filter((r) => !applicantGroupId || (r.applicantGroupId !== applicantGroupId && r.id !== applicantGroupId))
+      .map((r) => ({ ...r, blocking: this.inDupScope(r, scope) }))
+      .sort((a, b) => Number(b.blocking) - Number(a.blocking));
+    const blocking = matches.some((r) => r.blocking);
+    return { duplicate: matches.length > 0, blocking, match: matches[0] ?? null, matches: matches.slice(0, 5) };
   }
 
   async checkCccd(cccd?: string, phone?: string, excludeId?: string) {
