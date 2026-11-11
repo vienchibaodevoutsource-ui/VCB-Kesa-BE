@@ -68,7 +68,12 @@ model Company {
 
 model Candidate {
   id                 String               @id @default(uuid())
-  candidateCode      String?              @unique
+  // Mã hồ sơ: hồ sơ chuyển sang nhà máy khác (nhân bản) GIỮ NGUYÊN mã của hồ sơ gốc, nên cùng một mã
+  // có thể xuất hiện ở nhiều nhà máy. Ràng buộc thật nằm ở index tay Candidate_candidateCode_scope_key
+  // (migration 20261111120000_candidate_code_unique_per_factory): không trùng mã trong cùng nhà máy
+  // (hoặc cùng môi giới khi không có nhà máy), bỏ qua hồ sơ đã xoá mềm. Prisma không biểu diễn được
+  // index biểu thức/partial này — nếu `prisma migrate dev` đề xuất DROP nó thì phải xoá dòng đó khỏi migration.
+  candidateCode      String?
   status             CandidateStatus      @default(COMPLETED)
   draftSessionId     String?
   createdByUserId    String?
@@ -162,6 +167,7 @@ model Candidate {
 
   @@index([status, draftSessionId])
   @@index([deletedAt])
+  @@index([candidateCode])
   @@index([createdByUserId])
   @@index([teamCode])
   @@index([status, createdAt])

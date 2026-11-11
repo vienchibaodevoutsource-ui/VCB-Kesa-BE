@@ -533,10 +533,19 @@ export class CandidatesService {
         { brokerId: doomed.brokerId, factoryId: doomed.factoryId },
       );
     }
-    await this.prisma.candidate.update({
-      where: { id },
-      data: { deletedAt: null, deletedById: null, deletedByName: null },
-    });
+    try {
+      await this.prisma.candidate.update({
+        where: { id },
+        data: { deletedAt: null, deletedById: null, deletedByName: null },
+      });
+    } catch (error) {
+      // Mã hồ sơ chỉ duy nhất trong mỗi nhà máy với hồ sơ CHƯA xoá: lúc nằm thùng rác, nhà máy này có thể đã
+      // nhận một hồ sơ khác cùng mã (vd chuyển hồ sơ lại sang đây) → không khôi phục đè được.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('Nha may nay da co ho so khac cung ma ho so - khong the khoi phuc');
+      }
+      throw error;
+    }
     return { success: true };
   }
 
@@ -610,7 +619,11 @@ export class CandidatesService {
       factorySlug: factory?.slug,
     });
     const snapshotData = this.reapplySnapshotData(source.formSnapshot?.data, source.formDataJson, formType);
-    const teamCode = (await this.resolveTeamForCode(body.teamCode, user)) || source.teamCode || null;
+    // Hồ sơ chuyển GIỮ NGUYÊN mã hồ sơ gốc → tổ cũng bám tiền tố mã đó (không đổi theo tổ người chuyển).
+    // Hồ sơ gốc cũ chưa có mã (hiếm) thì để trống, lúc Lưu complete() cấp mã như hồ sơ mới.
+    const keptCode = source.candidateCode ?? null;
+    const teamCode =
+      this.teamPrefixFromCode(keptCode) ?? ((await this.resolveTeamForCode(body.teamCode, user)) || source.teamCode || null);
 
     const {
       id: _id,
@@ -652,7 +665,7 @@ export class CandidatesService {
           draftSessionId,
           createdByUserId: user.id,
           lastSavedAt: new Date(),
-          candidateCode: null,
+          candidateCode: keptCode,
           teamCode,
           company: broker?.name ?? null,
           brokerId,
